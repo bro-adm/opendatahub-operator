@@ -7,6 +7,12 @@ and configure these applications.
 ### Table of contents
 - [Usage](#usage)
   - [Prerequisites](#prerequisites)
+    - [Platform Requirements](#platform-requirements)
+    - [External Operators (Prerequisites)](#external-operators-prerequisites)
+    - [ODH Component Operators (Managed by ODH)](#odh-component-operators-managed-by-odh)
+    - [Optional Components](#optional-components)
+    - [Namespace Requirements](#namespace-requirements)
+    - [Resource Requirements](#resource-requirements)
   - [Installation](#installation)
   - [Configuration](#configuration)
     - [Log mode values](#log-mode-values)
@@ -24,6 +30,13 @@ and configure these applications.
       - [for build operator image](#for-build-operator-image)
     - [Build Image](#build-image)
     - [Deployment](#deployment)
+      - [Deployment Methods Comparison](#deployment-methods-comparison)
+  - [Cloud Manager (CCM)](#cloud-manager-ccm)
+    - [Supported Providers](#supported-providers)
+    - [CCM Deployment](#ccm-deployment)
+  - [RHAII Mode](#rhaii-mode)
+    - [Supported Providers](#supported-providers-1)
+    - [RHAII Deployment](#rhaii-deployment)
   - [Test with customized manifests](#test-with-customized-manifests)
   - [Update API docs](#update-api-docs)
   - [Change logging level at runtime](#change-logging-level-at-runtime)
@@ -37,6 +50,7 @@ and configure these applications.
     - [Running a Single E2E Test](#running-a-single-e2e-test)
     - [Change-to-Test Mapping](#change-to-test-mapping)
     - [E2E Tips/FAQ](#e2e-tipsfaq)
+      - [Alternative using E2E\_TEST\_FLAGS](#alternative-using-e2e_test_flags)
   - [Run Integration tests (Jenkins pipeline)](#run-integration-tests-jenkins-pipeline)
   - [Run Prometheus Unit Tests for Alerts](#run-prometheus-unit-tests-for-alerts)
   - [API Overview](#api-overview)
@@ -397,6 +411,143 @@ e.g `make image-build USE_LOCAL=true"`
   make catalog-build catalog-push -e CATALOG_IMG=quay.io/<username>/opendatahub-operator-index:<target_version> BUNDLE_IMGS=<list-of-comma-separated-bundle-images>
   ```
 
+### Cloud Manager (CCM)
+
+The Cloud Manager (CCM) is a separate controller that manages cloud-based Kubernetes clusters. It handles infrastructure provisioning and dependency management for supported cloud providers.
+
+#### Supported Providers
+
+| Provider | CRD | Description |
+|----------|-----|-------------|
+| **Azure** | `AzureKubernetesEngine` | Manages Azure AKS cluster infrastructure |
+| **CoreWeave** | `CoreWeaveKubernetesEngine` | Manages CoreWeave cluster infrastructure |
+
+Each provider manages dependencies such as Gateway API, cert-manager, LeaderWorkerSet (LWS), and Sail Operator.
+
+#### CCM Deployment
+
+**Build the cloud manager binary:**
+
+```commandline
+make build-ccm
+```
+
+**Deploy a cloud manager to the cluster (e.g., Azure):**
+
+```commandline
+make deploy-ccm-azure IMG=quay.io/<username>/opendatahub-operator:<custom-tag>
+```
+
+**Deploy with local image pull policy (for development):**
+
+```commandline
+make deploy-ccm-local-azure IMG=quay.io/<username>/opendatahub-operator:<custom-tag>
+```
+
+**Run a cloud manager locally:**
+
+```commandline
+make run-ccm-azure
+```
+
+**Install only the CRDs:**
+
+```commandline
+make install-ccm-azure
+```
+
+**Undeploy / Uninstall:**
+
+```commandline
+make undeploy-ccm-azure
+make uninstall-ccm-azure
+```
+
+Replace `azure` with `coreweave` for CoreWeave targets.
+
+**Example `AzureKubernetesEngine` CR:**
+
+```yaml
+apiVersion: infrastructure.opendatahub.io/v1alpha1
+kind: AzureKubernetesEngine
+metadata:
+  name: default-azurekubernetesengine
+spec:
+  dependencies:
+    gatewayAPI:
+      managementPolicy: Managed
+    certManager:
+      managementPolicy: Managed
+    lws:
+      managementPolicy: Managed
+    sailOperator:
+      managementPolicy: Managed
+```
+
+**Example `CoreWeaveKubernetesEngine` CR:**
+
+```yaml
+apiVersion: infrastructure.opendatahub.io/v1alpha1
+kind: CoreWeaveKubernetesEngine
+metadata:
+  name: default-coreweavekubernetesengine
+spec:
+  dependencies:
+    gatewayAPI:
+      managementPolicy: Managed
+    certManager:
+      managementPolicy: Managed
+    lws:
+      managementPolicy: Managed
+    sailOperator:
+      managementPolicy: Managed
+```
+
+### RHAII Mode
+
+RHAII (Red Hat AI Inference) is a deployment mode that runs a subset of the operator focused exclusively on **KServe**. This is useful when you only need model serving capabilities without the full Open Data Hub stack.
+
+In RHAII mode, the operator deploys only the KServe component CRD and its associated webhooks (connection-isvc and connection-llmisvc mutation webhooks).
+
+#### Supported Providers
+
+Tests are also performed with a KinD instance.
+
+| Provider | Description |
+|----------|-------------|
+| **Azure** | Azure Kubernetes Engine cloud provider |
+| **CoreWeave** | CoreWeave Kubernetes Engine cloud provider |
+
+#### RHAII Deployment
+
+**Deploy in RHAII mode:**
+
+```commandline
+make deploy-rhaii IMG=quay.io/<username>/opendatahub-operator:<custom-tag>
+```
+
+**Deploy with local image pull policy (for development):**
+
+```commandline
+make deploy-rhaii-local IMG=quay.io/<username>/opendatahub-operator:<custom-tag>
+```
+
+**Undeploy:**
+
+```commandline
+make undeploy-rhaii
+```
+
+**Example KServe CR for RHAII:**
+
+```yaml
+apiVersion: components.platform.opendatahub.io/v1alpha1
+kind: Kserve
+metadata:
+  name: default-kserve
+spec: {}
+```
+
 ### Test with customized manifests
 
 There are 2 ways to test your changes with modification:
@@ -729,6 +880,8 @@ Evn vars can be set to configure e2e tests:
 | E2E_TEST_APPLICATIONS_NAMESPACE      | Namespace where the ODH applications are deployed.                                                                                                                                                           | `opendatahub`                 |
 | E2E_TEST_WORKBENCHES_NAMESPACE       | Namespace where the workbenches are deployed.                                                                                                                                                                | `opendatahub`                 |
 | E2E_TEST_DSC_MONITORING_NAMESPACE    | Namespace where the ODH monitoring is deployed.                                                                                                                                                              | `opendatahub`                 |
+| E2E_TEST_DEPENDANT_OPERATORS_MANAGEMENT | To configure the execution of tests related to the Dependant Operators management, this is useful to run e2e tests for an operator running out of the cluster i.e. for debugging purposes                     | `true`                        |
+| E2E_TEST_DSC_MANAGEMENT             | To configure the execution of DSCI/DSC management tests, this is useful to run e2e tests for an operator running out of the cluster i.e. for debugging purposes                                              | `true`                        |
 | E2E_TEST_OPERATOR_CONTROLLER         | To configure the execution of tests related to the Operator POD, this is useful to run e2e tests for an operator running out of the cluster i.e. for debugging purposes                                      | `true`                        |
 | E2E_TEST_OPERATOR_RESILIENCE         | To configure the execution of operator resilience tests, useful for testing operator fault tolerance scenarios                                                                                               | `true`                        |
 | E2E_TEST_WEBHOOK                     | To configure the execution of tests related to the Operator WebHooks, this is useful to run e2e tests for an operator running out of the cluster i.e. for debugging purposes                                 | `true`                        |
@@ -752,6 +905,8 @@ Alternatively the above configurations can be passed to e2e-tests as flags by se
 | --applications-namespace      | Namespace where the ODH applications are deployed.                                                                                                                                                           | `opendatahub`                 |
 | --workbenches-namespace       | Namespace where the workbenches are deployed.                                                                                                                                                                | `opendatahub` |
 | --dsc-monitoring-namespace    | Namespace where the ODH monitoring is deployed.                                                                                                                                                              | `opendatahub` |
+| --test-dependant-operators-management | To configure the execution of tests related to the Dependant Operators management, this is useful to run e2e tests for an operator running out of the cluster i.e. for debugging purposes                     | `true`                        |
+| --test-dsc-management        | To configure the execution of DSCI/DSC management tests, this is useful to run e2e tests for an operator running out of the cluster i.e. for debugging purposes                                              | `true`                        |
 | --test-operator-controller    | To configure the execution of tests related to the Operator POD, this is useful to run e2e tests for an operator running out of the cluster i.e. for debugging purposes                                      | `true`                        |
 | --test-operator-resilience    | To configure the execution of operator resilience tests, useful for testing operator fault tolerance scenarios                                                                                               | `true`                        |
 | --test-webhook                | To configure the execution of tests related to the Operator WebHooks, this is useful to run e2e tests for an operator running out of the cluster i.e. for debugging purposes                                 | `true`                        |
