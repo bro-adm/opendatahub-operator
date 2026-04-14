@@ -130,6 +130,10 @@ func (s *componentHandler) NewComponentReconciler(ctx context.Context, mgr ctrl.
 		WithAction(configureIstioTelemetry).
 		WithAction(validatePersesResources).
 		WithAction(configurePersesResources).
+		WithAction(configureTelemetryExports).       // Adds to rr.Templates
+		WithAction(configureEnvoyFilter).            // Adds to rr.Templates
+		WithAction(renderObservabilityTemplates).    // Renders templates → rr.Resources
+		WithAction(configureObservabilityOwnership). // Sets OwnerReferences
 		WithAction(configureConfigHashAnnotation).
 		WithAction(deploy.NewAction(
 			deploy.WithCache(),

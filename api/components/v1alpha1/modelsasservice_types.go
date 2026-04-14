@@ -135,6 +135,25 @@ type TelemetryConfig struct {
 	// Metrics contains configuration for optional metric dimensions/labels.
 	// +kubebuilder:validation:Optional
 	Metrics *MetricsConfig `json:"metrics,omitempty"`
+
+	// Exports contains endpoints for loki and metering providers that maas uses for usage stats and billing
+	// +kubebuilder:validation:Optional
+	Exports *TelemetryExports `json:"exports,omitempty"`
+}
+
+// TelemetryExports defines external endpoints for exporting telemetry data.
+type TelemetryExports struct {
+	// LokiEndpoint is the URL endpoint for exporting logs to Loki.
+	// If not set, logs are not exported to Loki.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Pattern=`^https?://.*$`
+	LokiEndpoint *string `json:"lokiEndpoint,omitempty"`
+
+	// MeteringEndpoint is the URL endpoint for exporting metering/billing data.
+	// If not set, metering data is not exported to an external system.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Pattern=`^https?://.*$`
+	MeteringEndpoint *string `json:"meteringEndpoint,omitempty"`
 }
 
 // MetricsConfig defines which dimensions (labels) are captured in telemetry metrics.

@@ -1,0 +1,61 @@
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: user-usage
+  namespace: {{.Namespace}}
+  labels:
+    app.kubernetes.io/part-of: maas-observability
+spec:
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: '0.0.0.0:4317'
+    processors:
+      batch: {}
+      resource:
+        attributes:
+          - action: insert
+            key: log_type
+            value: application
+          - action: upsert
+            key: kubernetes_namespace_name
+            value: {{.Namespace}}
+    exporters:
+{{- if .HasLoki}}
+      otlphttp/loki:
+        auth:
+          authenticator: bearertokenauth
+        endpoint: {{.LokiEndpoint}}
+        tls:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+          insecure_skip_verify: true
+{{- end}}
+{{- if .HasMetering}}
+      otlp_grpc/openmeter:
+        endpoint: {{.MeteringEndpoint}}
+        tls:
+          insecure: true
+{{- end}}
+    extensions:
+{{- if .HasLoki}}
+      bearertokenauth:
+        filename: /var/run/secrets/kubernetes.io/serviceaccount/token
+{{- end}}
+    service:
+      extensions:
+{{- if .HasLoki}}
+        - bearertokenauth
+{{- end}}
+      pipelines:
+        logs:
+          receivers: [otlp]
+          processors: [resource, batch]
+          exporters:
+{{- if .HasLoki}}
+            - otlphttp/loki
+{{- end}}
+{{- if .HasMetering}}
+            - otlp_grpc/openmeter
+{{- end}}

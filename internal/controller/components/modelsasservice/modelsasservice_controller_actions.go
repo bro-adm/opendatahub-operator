@@ -17,14 +17,17 @@ limitations under the License.
 package modelsasservice
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	gt "text/template"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -33,6 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -44,6 +48,17 @@ import (
 	"github.com/opendatahub-io/opendatahub-operator/v2/pkg/controller/types"
 	odhdeploy "github.com/opendatahub-io/opendatahub-operator/v2/pkg/deploy"
 	"github.com/opendatahub-io/opendatahub-operator/v2/pkg/metadata/labels"
+	"github.com/opendatahub-io/opendatahub-operator/v2/pkg/resources"
+	templateutils "github.com/opendatahub-io/opendatahub-operator/v2/pkg/utils/template"
+)
+
+//go:embed resources
+var resourcesFS embed.FS
+
+// Template constants for observability resources.
+const (
+	OpenTelemetryCollectorTemplate = "resources/opentelemetry-collector.tmpl.yaml"
+	EnvoyFilterTokenUsageTemplate  = "resources/envoyfilter-token-usage.tmpl.yaml"
 )
 
 // validateGateway validates the Gateway specification in the ModelsAsService resource.
@@ -229,6 +244,363 @@ func configureDestinationRule(log logr.Logger, resource *unstructured.Unstructur
 		"newNamespace", gatewayNamespace)
 
 	resource.SetNamespace(gatewayNamespace)
+}
+
+// configureEnvoyFilter is a post-render action that creates an EnvoyFilter resource
+// for token usage monitoring when observability exports are configured.
+//
+// The EnvoyFilter is generated programmatically (not from manifests) because
+// its configuration is entirely dynamic based on the OTel collector endpoint.
+//
+// configureEnvoyFilter adds EnvoyFilter template when exports are configured.
+//
+//nolint:dupl // Acceptable duplication - follows pattern of configureTelemetryExports
+func configureEnvoyFilter(ctx context.Context, rr *types.ReconciliationRequest) error {
+	// Check telemetry exports configured FIRST to avoid CRD lookup when feature is disabled.
+	// This prevents transient CRD lookup failures from failing reconciles unnecessarily.
+	maas, ok := rr.Instance.(*componentApi.ModelsAsService)
+	if !ok {
+		return fmt.Errorf("resource instance %v is not a componentApi.ModelsAsService", rr.Instance)
+	}
+	if maas.Spec.Telemetry == nil || maas.Spec.Telemetry.Exports == nil {
+		return nil
+	}
+
+	exports := maas.Spec.Telemetry.Exports
+	hasLoki := exports.LokiEndpoint != nil && *exports.LokiEndpoint != ""
+	hasMetering := exports.MeteringEndpoint != nil && *exports.MeteringEndpoint != ""
+
+	if !hasLoki && !hasMetering {
+		return nil
+	}
+
+	log := logf.FromContext(ctx)
+
+	// Skip if EnvoyFilter CRD is not available in the cluster
+	crdAvailable, err := cluster.HasCRD(ctx, rr.Client, gvk.EnvoyFilter)
+	if err != nil {
+		return fmt.Errorf("failed to check EnvoyFilter CRD availability: %w", err)
+	}
+	if !crdAvailable {
+		log.V(2).Info("EnvoyFilter CRD not available, skipping")
+		return nil
+	}
+
+	// Add template to be rendered
+	rr.Templates = append(rr.Templates, types.TemplateInfo{
+		FS:   resourcesFS,
+		Path: EnvoyFilterTokenUsageTemplate,
+	})
+
+	return nil
+}
+
+//nolint:unused // Kept for reference during transition to template-based approach
+func configureEnvoyFilterCore(ctx context.Context, rr *types.ReconciliationRequest) error {
+	log := logf.FromContext(ctx)
+
+	log.Info("DEBUG: configureEnvoyFilterCore called")
+
+	maas, ok := rr.Instance.(*componentApi.ModelsAsService)
+	if !ok {
+		return fmt.Errorf("resource instance %v is not a componentApi.ModelsAsService", rr.Instance)
+	}
+
+	// Check if telemetry exports are configured
+	if maas.Spec.Telemetry == nil || maas.Spec.Telemetry.Exports == nil {
+		log.Info("DEBUG: Telemetry exports not configured, skipping EnvoyFilter creation")
+		return nil
+	}
+
+	exports := maas.Spec.Telemetry.Exports
+	hasLoki := exports.LokiEndpoint != nil && *exports.LokiEndpoint != ""
+	hasMetering := exports.MeteringEndpoint != nil && *exports.MeteringEndpoint != ""
+
+	log.Info("DEBUG: EnvoyFilter exports check", "hasLoki", hasLoki, "hasMetering", hasMetering)
+
+	if !hasLoki && !hasMetering {
+		log.Info("DEBUG: No telemetry export endpoints configured, skipping EnvoyFilter creation")
+		return nil
+	}
+
+	appNamespace, err := cluster.ApplicationNamespace(ctx, rr.Client)
+	if err != nil {
+		return err
+	}
+
+	gatewayNamespace := maas.Spec.GatewayRef.Namespace
+	gatewayName := maas.Spec.GatewayRef.Name
+
+	// Create OwnerReference for the EnvoyFilter
+	controller := true
+	ownerRef := metav1.OwnerReference{
+		APIVersion:         maas.APIVersion,
+		Kind:               maas.Kind,
+		Name:               maas.Name,
+		UID:                maas.UID,
+		Controller:         &controller,
+		BlockOwnerDeletion: &controller,
+	}
+
+	// Build OTel collector endpoint (user-usage service in app namespace)
+	otelEndpoint := fmt.Sprintf("%s.%s.svc.cluster.local", OTelCollectorName, appNamespace)
+
+	// Build the three config patches
+	configPatches := []any{
+		buildClusterPatch(otelEndpoint),
+		buildHTTPFilterPatch(),
+		buildNetworkFilterPatch(),
+	}
+
+	// Create the EnvoyFilter resource
+	envoyFilter := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "networking.istio.io/v1alpha3",
+			"kind":       "EnvoyFilter",
+			"metadata": map[string]any{
+				"name":      GatewayEnvoyFilterName,
+				"namespace": gatewayNamespace,
+				"labels": map[string]any{
+					"app.kubernetes.io/part-of": "maas-observability",
+				},
+			},
+			"spec": map[string]any{
+				"workloadSelector": map[string]any{
+					"labels": map[string]any{
+						"gateway.networking.k8s.io/gateway-name": gatewayName,
+					},
+				},
+				"configPatches": configPatches,
+			},
+		},
+	}
+
+	// Set OwnerReferences using the unstructured API
+	envoyFilter.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
+
+	log.V(2).Info("Creating EnvoyFilter for token usage monitoring",
+		"name", GatewayEnvoyFilterName,
+		"namespace", gatewayNamespace,
+		"gatewayName", gatewayName,
+		"otelEndpoint", otelEndpoint)
+
+	// Add to resources for deployment
+	rr.Resources = append(rr.Resources, *envoyFilter)
+
+	return nil
+}
+
+//nolint:unused // Kept for reference during transition to template-based approach
+func buildClusterPatch(otelEndpoint string) map[string]any {
+	return map[string]any{
+		"applyTo": "CLUSTER",
+		"patch": map[string]any{
+			"operation": "ADD",
+			"value": map[string]any{
+				"name":                   "otel_als_cluster",
+				"type":                   "STRICT_DNS",
+				"connect_timeout":        "5s",
+				"http2_protocol_options": map[string]any{},
+				"load_assignment": map[string]any{
+					"cluster_name": "otel_als_cluster",
+					"endpoints": []any{
+						map[string]any{
+							"lb_endpoints": []any{
+								map[string]any{
+									"endpoint": map[string]any{
+										"address": map[string]any{
+											"socket_address": map[string]any{
+												"address":    otelEndpoint,
+												"port_value": int64(4317),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+//nolint:unused // Kept for reference during transition to template-based approach
+func buildHTTPFilterPatch() map[string]any {
+	return map[string]any{
+		"applyTo": "HTTP_FILTER",
+		"match": map[string]any{
+			"context": "GATEWAY",
+			"listener": map[string]any{
+				"filterChain": map[string]any{
+					"filter": map[string]any{
+						"name": "envoy.filters.network.http_connection_manager",
+						"subFilter": map[string]any{
+							"name": "envoy.filters.http.router",
+						},
+					},
+				},
+			},
+		},
+		"patch": map[string]any{
+			"operation": "INSERT_BEFORE",
+			"value": map[string]any{
+				"name": "envoy.filters.http.json_to_metadata",
+				"typed_config": map[string]any{
+					"@type": "type.googleapis.com/envoy.extensions.filters.http.json_to_metadata.v3.JsonToMetadata",
+					"response_rules": map[string]any{
+						"rules": []any{
+							buildJSONExtractionRule("usage", "total_tokens", "tokens_total", "NUMBER"),
+							buildJSONExtractionRule("usage", "prompt_tokens", "tokens_prompt", "NUMBER"),
+							buildJSONExtractionRule("usage", "completion_tokens", "tokens_completion", "NUMBER"),
+							buildJSONExtractionRule("model", "", "model", "STRING"),
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+//nolint:unused // Kept for reference during transition to template-based approach
+func buildJSONExtractionRule(selector1, selector2, metadataKey, valueType string) map[string]any {
+	rule := map[string]any{}
+
+	// Build selectors array
+	selectors := []any{
+		map[string]any{"key": selector1},
+	}
+	if selector2 != "" {
+		selectors = append(selectors, map[string]any{"key": selector2})
+	}
+	rule["selectors"] = selectors
+
+	// on_present
+	onPresent := map[string]any{
+		"metadata_namespace": "envoy.filters.http.json_to_metadata",
+		"key":                metadataKey,
+	}
+	if valueType == "NUMBER" {
+		onPresent["type"] = "NUMBER"
+	}
+	rule["on_present"] = onPresent
+
+	// on_missing and on_error with default values
+	defaultValue := "0"
+	if valueType == "STRING" {
+		defaultValue = ""
+	}
+
+	onMissing := map[string]any{
+		"metadata_namespace": "envoy.filters.http.json_to_metadata",
+		"key":                metadataKey,
+		"value":              defaultValue,
+	}
+	rule["on_missing"] = onMissing
+
+	onError := map[string]any{
+		"metadata_namespace": "envoy.filters.http.json_to_metadata",
+		"key":                metadataKey,
+		"value":              defaultValue,
+	}
+	rule["on_error"] = onError
+
+	return rule
+}
+
+//nolint:unused // Kept for reference during transition to template-based approach
+func buildNetworkFilterPatch() map[string]any {
+	return map[string]any{
+		"applyTo": "NETWORK_FILTER",
+		"match": map[string]any{
+			"context": "GATEWAY",
+			"listener": map[string]any{
+				"filterChain": map[string]any{
+					"filter": map[string]any{
+						"name": "envoy.filters.network.http_connection_manager",
+					},
+				},
+			},
+		},
+		"patch": map[string]any{
+			"operation": "MERGE",
+			"value": map[string]any{
+				"typed_config": map[string]any{
+					"@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+					"access_log": []any{
+						map[string]any{
+							"name": "envoy.access_loggers.open_telemetry",
+							"typed_config": map[string]any{
+								"@type": "type.googleapis.com/envoy.extensions.access_loggers.open_telemetry.v3.OpenTelemetryAccessLogConfig",
+								"common_config": map[string]any{
+									"log_name":              "maas-usage-log",
+									"transport_api_version": "V3",
+									"grpc_service": map[string]any{
+										"envoy_grpc": map[string]any{
+											"cluster_name": "otel_als_cluster",
+										},
+									},
+								},
+								"resource_attributes": map[string]any{
+									"values": []any{
+										map[string]any{
+											"key": "service.name",
+											"value": map[string]any{
+												"string_value": "maas-gateway",
+											},
+										},
+									},
+								},
+								"body": map[string]any{
+									"string_value": "%REQ(:METHOD)% %REQ(:PATH)% %RESPONSE_CODE%",
+								},
+								"attributes": map[string]any{
+									"values": buildAccessLogAttributes(),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+//nolint:unused // Kept for reference during transition to template-based approach
+func buildAccessLogAttributes() []any {
+	attrs := []string{
+		"response_code:%RESPONSE_CODE%",
+		"request_id:%REQ(X-REQUEST-ID)%",
+		"method:%REQ(:METHOD)%",
+		"path:%REQ(:PATH)%",
+		"upstream_cluster:%UPSTREAM_CLUSTER%",
+		"duration_ms:%DURATION%",
+		"bytes_received:%BYTES_RECEIVED%",
+		"bytes_sent:%BYTES_SENT%",
+		"authority:%REQ(:AUTHORITY)%",
+		"response_code_details:%RESPONSE_CODE_DETAILS%",
+		"downstream_remote_address:%DOWNSTREAM_REMOTE_ADDRESS%",
+		"route_name:%ROUTE_NAME%",
+		"user_id:%REQ(x-maas-user-id)%",
+		"subscription:%REQ(x-maas-subscription-id)%",
+		"tokens_total:%DYNAMIC_METADATA(envoy.filters.http.json_to_metadata:tokens_total)%",
+		"tokens_prompt:%DYNAMIC_METADATA(envoy.filters.http.json_to_metadata:tokens_prompt)%",
+		"tokens_completion:%DYNAMIC_METADATA(envoy.filters.http.json_to_metadata:tokens_completion)%",
+		"model:%DYNAMIC_METADATA(envoy.filters.http.json_to_metadata:model)%",
+	}
+
+	result := make([]any, len(attrs))
+	for i, attr := range attrs {
+		parts := strings.SplitN(attr, ":", 2)
+		result[i] = map[string]any{
+			"key": parts[0],
+			"value": map[string]any{
+				"string_value": parts[1],
+			},
+		}
+	}
+
+	return result
 }
 
 // configureExternalOIDC is a post-render action that patches the maas-api AuthPolicy
@@ -717,6 +1089,328 @@ func buildTelemetryLabels(log logr.Logger, config *componentApi.TelemetryConfig)
 		"totalLabels", len(labels))
 
 	return labels
+}
+
+// configureTelemetryExports is a post-render action that creates an OpenTelemetryCollector
+// resource for exporting telemetry data when observability exports are configured.
+//
+// The OpenTelemetryCollector is generated programmatically (not from manifests) because
+// its configuration is entirely dynamic based on spec.telemetry.exports settings.
+//
+// configureTelemetryExports adds OpenTelemetryCollector template when exports are configured.
+//
+//nolint:dupl // Acceptable duplication - follows pattern of configureEnvoyFilter
+func configureTelemetryExports(ctx context.Context, rr *types.ReconciliationRequest) error {
+	// Check telemetry exports configured FIRST to avoid CRD lookup when feature is disabled.
+	// This prevents transient CRD lookup failures from failing reconciles unnecessarily.
+	maas, ok := rr.Instance.(*componentApi.ModelsAsService)
+	if !ok {
+		return fmt.Errorf("resource instance %v is not a componentApi.ModelsAsService", rr.Instance)
+	}
+	if maas.Spec.Telemetry == nil || maas.Spec.Telemetry.Exports == nil {
+		return nil
+	}
+
+	exports := maas.Spec.Telemetry.Exports
+	hasLoki := exports.LokiEndpoint != nil && *exports.LokiEndpoint != ""
+	hasMetering := exports.MeteringEndpoint != nil && *exports.MeteringEndpoint != ""
+
+	if !hasLoki && !hasMetering {
+		return nil
+	}
+
+	log := logf.FromContext(ctx)
+
+	// Skip if OpenTelemetryCollector CRD is not available in the cluster
+	crdAvailable, err := cluster.HasCRD(ctx, rr.Client, gvk.OpenTelemetryCollector)
+	if err != nil {
+		return fmt.Errorf("failed to check OpenTelemetryCollector CRD availability: %w", err)
+	}
+	if !crdAvailable {
+		log.V(2).Info("OpenTelemetryCollector CRD not available, skipping")
+		return nil
+	}
+
+	// Add template to be rendered
+	rr.Templates = append(rr.Templates, types.TemplateInfo{
+		FS:   resourcesFS,
+		Path: OpenTelemetryCollectorTemplate,
+	})
+
+	return nil
+}
+
+//nolint:unused // Kept for reference during transition to template-based approach
+func configureTelemetryExportsCore(ctx context.Context, rr *types.ReconciliationRequest) error {
+	log := logf.FromContext(ctx)
+
+	maas, ok := rr.Instance.(*componentApi.ModelsAsService)
+	if !ok {
+		return fmt.Errorf("resource instance %v is not a componentApi.ModelsAsService", rr.Instance)
+	}
+
+	// Check if telemetry exports are configured
+	if maas.Spec.Telemetry == nil || maas.Spec.Telemetry.Exports == nil {
+		log.V(2).Info("Telemetry exports not configured, skipping OpenTelemetryCollector creation")
+		return nil
+	}
+
+	exports := maas.Spec.Telemetry.Exports
+	hasLoki := exports.LokiEndpoint != nil && *exports.LokiEndpoint != ""
+	hasMetering := exports.MeteringEndpoint != nil && *exports.MeteringEndpoint != ""
+
+	if !hasLoki && !hasMetering {
+		log.V(2).Info("No telemetry export endpoints configured, skipping OpenTelemetryCollector creation")
+		return nil
+	}
+
+	appNamespace, err := cluster.ApplicationNamespace(ctx, rr.Client)
+	if err != nil {
+		return err
+	}
+
+	// Create OwnerReference for the OpenTelemetryCollector
+	controller := true
+	ownerRef := metav1.OwnerReference{
+		APIVersion:         maas.APIVersion,
+		Kind:               maas.Kind,
+		Name:               maas.Name,
+		UID:                maas.UID,
+		Controller:         &controller,
+		BlockOwnerDeletion: &controller,
+	}
+
+	// Build exporters map
+	exportersMap := map[string]any{}
+	exportersList := []any{}
+
+	// Add Loki exporter if configured
+	if hasLoki {
+		exportersMap["otlphttp/loki"] = map[string]any{
+			"auth": map[string]any{
+				"authenticator": "bearertokenauth",
+			},
+			"endpoint": *exports.LokiEndpoint,
+			"tls": map[string]any{
+				"ca_file":              "/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt",
+				"insecure_skip_verify": true,
+			},
+		}
+		exportersList = append(exportersList, "otlphttp/loki")
+		log.V(4).Info("Configuring Loki exporter", "endpoint", *exports.LokiEndpoint)
+	}
+
+	// Add OpenMeter exporter if configured
+	if hasMetering {
+		exportersMap["otlp_grpc/openmeter"] = map[string]any{
+			"endpoint": *exports.MeteringEndpoint,
+			"tls": map[string]any{
+				"insecure": true,
+			},
+		}
+		exportersList = append(exportersList, "otlp_grpc/openmeter")
+		log.V(4).Info("Configuring metering exporter", "endpoint", *exports.MeteringEndpoint)
+	}
+
+	// Build extensions and extensions list
+	extensionsMap := map[string]any{}
+	extensionsList := []any{}
+
+	if hasLoki {
+		extensionsMap["bearertokenauth"] = map[string]any{
+			"filename": "/var/run/secrets/kubernetes.io/serviceaccount/token",
+		}
+		extensionsList = append(extensionsList, "bearertokenauth")
+	}
+
+	// Build complete config structure
+	config := map[string]any{
+		"receivers": map[string]any{
+			"otlp": map[string]any{
+				"protocols": map[string]any{
+					"grpc": map[string]any{
+						"endpoint": "0.0.0.0:4317",
+					},
+				},
+			},
+		},
+		"processors": map[string]any{
+			"batch": map[string]any{},
+			"resource": map[string]any{
+				"attributes": []any{
+					map[string]any{
+						"action": "insert",
+						"key":    "log_type",
+						"value":  "application",
+					},
+					map[string]any{
+						"action": "upsert",
+						"key":    "kubernetes_namespace_name",
+						"value":  appNamespace,
+					},
+				},
+			},
+		},
+		"exporters":  exportersMap,
+		"extensions": extensionsMap,
+		"service": map[string]any{
+			"extensions": extensionsList,
+			"pipelines": map[string]any{
+				"logs": map[string]any{
+					"receivers":  []any{"otlp"},
+					"processors": []any{"resource", "batch"},
+					"exporters":  exportersList,
+				},
+			},
+		},
+	}
+
+	// Create the OpenTelemetryCollector resource
+	otelCollector := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "opentelemetry.io/v1beta1",
+			"kind":       "OpenTelemetryCollector",
+			"metadata": map[string]any{
+				"name":      OTelCollectorName,
+				"namespace": appNamespace,
+				"labels": map[string]any{
+					"app.kubernetes.io/part-of": "maas-observability",
+				},
+			},
+			"spec": map[string]any{
+				"config": config,
+			},
+		},
+	}
+
+	// Set OwnerReferences using the unstructured API
+	otelCollector.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
+
+	log.V(2).Info("Creating OpenTelemetryCollector",
+		"name", OTelCollectorName,
+		"namespace", appNamespace,
+		"hasLoki", hasLoki,
+		"hasMetering", hasMetering)
+
+	// Add to resources for deployment
+	rr.Resources = append(rr.Resources, *otelCollector)
+
+	return nil
+}
+
+// renderObservabilityTemplates renders OTel and EnvoyFilter templates with dynamic data.
+func renderObservabilityTemplates(ctx context.Context, rr *types.ReconciliationRequest) error {
+	maas, ok := rr.Instance.(*componentApi.ModelsAsService)
+	if !ok {
+		return fmt.Errorf("resource instance %v is not a componentApi.ModelsAsService", rr.Instance)
+	}
+
+	// Only render if templates were added
+	if len(rr.Templates) == 0 {
+		return nil
+	}
+
+	log := logf.FromContext(ctx)
+	decoder := serializer.NewCodecFactory(rr.Client.Scheme()).UniversalDeserializer()
+	var buffer bytes.Buffer
+
+	// Process each template
+	for _, tmpl := range rr.Templates {
+		var templateData map[string]any
+		var err error
+
+		switch tmpl.Path {
+		case OpenTelemetryCollectorTemplate:
+			templateData, err = getOTelCollectorTemplateData(ctx, rr.Client, maas)
+			if err != nil {
+				return fmt.Errorf("failed to prepare template data for %s: %w", tmpl.Path, err)
+			}
+			log.V(4).Info("Rendering OpenTelemetryCollector template", "data", templateData)
+
+		case EnvoyFilterTokenUsageTemplate:
+			templateData, err = getEnvoyFilterTemplateData(ctx, rr.Client, maas)
+			if err != nil {
+				return fmt.Errorf("failed to prepare template data for %s: %w", tmpl.Path, err)
+			}
+			log.V(4).Info("Rendering EnvoyFilter template", "data", templateData)
+
+		default:
+			return fmt.Errorf("unknown template path: %s", tmpl.Path)
+		}
+
+		// Parse and execute template
+		t, err := gt.New("").Option("missingkey=error").Funcs(templateutils.TextTemplateFuncMap()).ParseFS(tmpl.FS, tmpl.Path)
+		if err != nil {
+			return fmt.Errorf("failed to parse template %s: %w", tmpl.Path, err)
+		}
+
+		for _, tpl := range t.Templates() {
+			buffer.Reset()
+			err = tpl.Execute(&buffer, templateData)
+			if err != nil {
+				return fmt.Errorf("failed to execute template %s: %w", tmpl.Path, err)
+			}
+
+			// Decode rendered YAML to unstructured resources
+			u, err := resources.Decode(decoder, buffer.Bytes())
+			if err != nil {
+				return fmt.Errorf("failed to decode template %s: %w", tmpl.Path, err)
+			}
+
+			log.V(2).Info("Template rendered successfully",
+				"template", tmpl.Path,
+				"resourceCount", len(u))
+
+			// Add rendered resources
+			rr.Resources = append(rr.Resources, u...)
+		}
+	}
+
+	return nil
+}
+
+// configureObservabilityOwnership sets OwnerReferences on observability resources.
+func configureObservabilityOwnership(ctx context.Context, rr *types.ReconciliationRequest) error {
+	maas, ok := rr.Instance.(*componentApi.ModelsAsService)
+	if !ok {
+		return fmt.Errorf("resource instance %v is not a componentApi.ModelsAsService", rr.Instance)
+	}
+
+	controller := true
+	ownerRef := metav1.OwnerReference{
+		APIVersion:         maas.APIVersion,
+		Kind:               maas.Kind,
+		Name:               maas.Name,
+		UID:                maas.UID,
+		Controller:         &controller,
+		BlockOwnerDeletion: &controller,
+	}
+
+	log := logf.FromContext(ctx)
+	count := 0
+
+	// Find and update observability resources
+	for idx := range rr.Resources {
+		resource := &rr.Resources[idx]
+
+		// Check if it's an observability resource by label
+		labels := resource.GetLabels()
+		if labels != nil && labels["app.kubernetes.io/part-of"] == "maas-observability" {
+			// Set OwnerReferences
+			resource.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
+			count++
+			log.V(4).Info("Set OwnerReference on observability resource",
+				"kind", resource.GetKind(),
+				"name", resource.GetName(),
+				"namespace", resource.GetNamespace())
+		}
+	}
+
+	if count > 0 {
+		log.V(2).Info("Set OwnerReferences on observability resources", "count", count)
+	}
+
+	return nil
 }
 
 // configureConfigHashAnnotation adds a hash annotation to the maas-api Deployment
