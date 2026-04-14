@@ -3,14 +3,17 @@ package modelsasservice
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -20,8 +23,15 @@ import (
 	"github.com/opendatahub-io/opendatahub-operator/v2/pkg/controller/types"
 	"github.com/opendatahub-io/opendatahub-operator/v2/pkg/metadata/labels"
 	"github.com/opendatahub-io/opendatahub-operator/v2/pkg/utils/test/fakeclient"
+	"github.com/opendatahub-io/opendatahub-operator/v2/pkg/utils/test/scheme"
 
 	. "github.com/onsi/gomega"
+)
+
+const (
+	// Test telemetry endpoint constants.
+	testLokiEndpoint     = "https://loki.example.com"
+	testMeteringEndpoint = "https://meter.example.com"
 )
 
 func boolPtr(v bool) *bool { return &v }
@@ -1786,6 +1796,522 @@ func TestConfigureIstioTelemetry(t *testing.T) {
 			g.Expect(ok).Should(BeTrue(), "subscription should be map[string]any")
 			g.Expect(subscription["operation"]).Should(Equal("UPSERT"))
 			g.Expect(subscription["value"]).Should(Equal(`request.headers["x-maas-subscription"]`))
+		})
+	})
+}
+
+// createModelsAsServiceWithTelemetry creates a ModelsAsService instance with telemetry configuration.
+func createModelsAsServiceWithTelemetry(loki, metering *string) *componentApi.ModelsAsService {
+	maas := &componentApi.ModelsAsService{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "components.platform.opendatahub.io/v1alpha1",
+			Kind:       "ModelsAsService",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: componentApi.ModelsAsServiceInstanceName,
+			UID:  "test-uid-123",
+		},
+		Spec: componentApi.ModelsAsServiceSpec{
+			GatewayRef: componentApi.GatewayRef{
+				Namespace: "test-gateway-ns",
+				Name:      "test-gateway",
+			},
+			Telemetry: &componentApi.TelemetryConfig{
+				Enabled: boolPtr(true),
+			},
+		},
+	}
+
+	if loki != nil || metering != nil {
+		maas.Spec.Telemetry.Exports = &componentApi.TelemetryExports{
+			LokiEndpoint:     loki,
+			MeteringEndpoint: metering,
+		}
+	}
+
+	return maas
+}
+
+// createReconciliationRequestWithCRD creates a basic reconciliation request with specified CRD support.
+func createReconciliationRequestWithCRD(maas *componentApi.ModelsAsService, includeCRDs ...schema.GroupVersionKind) *types.ReconciliationRequest {
+	// Create a custom scheme with the CRD types registered
+	testScheme, err := scheme.New()
+	if err != nil {
+		panic(fmt.Sprintf("failed to create scheme: %v", err))
+	}
+
+	// Register the GVKs we want to test with
+	for _, crdGVK := range includeCRDs {
+		testScheme.AddKnownTypeWithName(crdGVK, &unstructured.Unstructured{})
+		testScheme.AddKnownTypeWithName(crdGVK.GroupVersion().WithKind(crdGVK.Kind+"List"), &unstructured.UnstructuredList{})
+	}
+
+	// Create CRD objects for the fake client
+	crdObjects := make([]client.Object, 0, len(includeCRDs))
+	for _, crdGVK := range includeCRDs {
+		crd := createCRDForGVK(crdGVK)
+		crdObjects = append(crdObjects, crd)
+	}
+
+	cli, err := fakeclient.New(
+		fakeclient.WithScheme(testScheme),
+		fakeclient.WithObjects(append(crdObjects, maas)...),
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create fake client: %v", err))
+	}
+
+	return &types.ReconciliationRequest{
+		Client:    cli,
+		Instance:  maas,
+		Resources: []unstructured.Unstructured{},
+		Templates: []types.TemplateInfo{},
+	}
+}
+
+// createCRDForGVK creates a CRD object for testing.
+func createCRDForGVK(gvkType schema.GroupVersionKind) client.Object {
+	plural := strings.ToLower(gvkType.Kind) + "s"
+	crdName := fmt.Sprintf("%s.%s", plural, gvkType.Group)
+
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: crdName,
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: gvkType.Group,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Kind:   gvkType.Kind,
+				Plural: plural,
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    gvkType.Version,
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type: "object",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	return crd
+}
+
+func TestConfigureTelemetryExports(t *testing.T) {
+	g := NewWithT(t)
+
+	t.Run("Error Handling", func(t *testing.T) {
+		t.Run("should skip when telemetry exports is nil", func(t *testing.T) {
+			maas := &componentApi.ModelsAsService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: componentApi.ModelsAsServiceInstanceName,
+				},
+				Spec: componentApi.ModelsAsServiceSpec{
+					Telemetry: nil,
+				},
+			}
+
+			cli, err := fakeclient.New()
+			g.Expect(err).ShouldNot(HaveOccurred())
+
+			rr := &types.ReconciliationRequest{
+				Instance:  maas,
+				Client:    cli,
+				Templates: []types.TemplateInfo{},
+			}
+
+			err = configureTelemetryExports(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(BeEmpty())
+		})
+
+		t.Run("should skip when exports is nil", func(t *testing.T) {
+			maas := &componentApi.ModelsAsService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: componentApi.ModelsAsServiceInstanceName,
+				},
+				Spec: componentApi.ModelsAsServiceSpec{
+					Telemetry: &componentApi.TelemetryConfig{
+						Enabled: boolPtr(true),
+						Exports: nil,
+					},
+				},
+			}
+
+			cli, err := fakeclient.New()
+			g.Expect(err).ShouldNot(HaveOccurred())
+
+			rr := &types.ReconciliationRequest{
+				Instance:  maas,
+				Client:    cli,
+				Templates: []types.TemplateInfo{},
+			}
+
+			err = configureTelemetryExports(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(BeEmpty())
+		})
+
+		t.Run("should skip when no endpoints configured", func(t *testing.T) {
+			maas := &componentApi.ModelsAsService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: componentApi.ModelsAsServiceInstanceName,
+				},
+				Spec: componentApi.ModelsAsServiceSpec{
+					Telemetry: &componentApi.TelemetryConfig{
+						Enabled: boolPtr(true),
+						Exports: &componentApi.TelemetryExports{},
+					},
+				},
+			}
+
+			cli, err := fakeclient.New()
+			g.Expect(err).ShouldNot(HaveOccurred())
+
+			rr := &types.ReconciliationRequest{
+				Instance:  maas,
+				Client:    cli,
+				Templates: []types.TemplateInfo{},
+			}
+
+			err = configureTelemetryExports(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(BeEmpty())
+		})
+
+		t.Run("should skip when endpoints are empty strings", func(t *testing.T) {
+			emptyString := ""
+			maas := &componentApi.ModelsAsService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: componentApi.ModelsAsServiceInstanceName,
+				},
+				Spec: componentApi.ModelsAsServiceSpec{
+					Telemetry: &componentApi.TelemetryConfig{
+						Enabled: boolPtr(true),
+						Exports: &componentApi.TelemetryExports{
+							LokiEndpoint:     &emptyString,
+							MeteringEndpoint: &emptyString,
+						},
+					},
+				},
+			}
+
+			cli, err := fakeclient.New()
+			g.Expect(err).ShouldNot(HaveOccurred())
+
+			rr := &types.ReconciliationRequest{
+				Instance:  maas,
+				Client:    cli,
+				Templates: []types.TemplateInfo{},
+			}
+
+			err = configureTelemetryExports(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(BeEmpty())
+		})
+
+		t.Run("should skip when OTel CRD not available", func(t *testing.T) {
+			lokiEndpoint := testLokiEndpoint
+			maas := createModelsAsServiceWithTelemetry(&lokiEndpoint, nil)
+
+			// Create fake client without OpenTelemetryCollector CRD
+			cli := createFakeClientWithoutGateway()
+
+			rr := &types.ReconciliationRequest{
+				Instance:  maas,
+				Client:    cli,
+				Templates: []types.TemplateInfo{},
+			}
+
+			err := configureTelemetryExports(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(BeEmpty())
+		})
+	})
+
+	t.Run("Template Addition", func(t *testing.T) {
+		t.Run("should add template with Loki endpoint", func(t *testing.T) {
+			lokiEndpoint := testLokiEndpoint
+			maas := createModelsAsServiceWithTelemetry(&lokiEndpoint, nil)
+
+			rr := createReconciliationRequestWithCRD(maas, gvk.OpenTelemetryCollector)
+
+			err := configureTelemetryExports(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(HaveLen(1))
+			g.Expect(rr.Templates[0].Path).Should(Equal(OpenTelemetryCollectorTemplate))
+			g.Expect(rr.Templates[0].FS).Should(Equal(resourcesFS))
+		})
+
+		t.Run("should add template with metering endpoint", func(t *testing.T) {
+			meteringEndpoint := testMeteringEndpoint
+			maas := createModelsAsServiceWithTelemetry(nil, &meteringEndpoint)
+
+			rr := createReconciliationRequestWithCRD(maas, gvk.OpenTelemetryCollector)
+
+			err := configureTelemetryExports(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(HaveLen(1))
+			g.Expect(rr.Templates[0].Path).Should(Equal(OpenTelemetryCollectorTemplate))
+		})
+
+		t.Run("should add template with both endpoints", func(t *testing.T) {
+			lokiEndpoint := testLokiEndpoint
+			meteringEndpoint := testMeteringEndpoint
+			maas := createModelsAsServiceWithTelemetry(&lokiEndpoint, &meteringEndpoint)
+
+			rr := createReconciliationRequestWithCRD(maas, gvk.OpenTelemetryCollector)
+
+			err := configureTelemetryExports(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(HaveLen(1))
+		})
+	})
+}
+
+func TestConfigureEnvoyFilter(t *testing.T) {
+	g := NewWithT(t)
+
+	t.Run("Error Handling", func(t *testing.T) {
+		t.Run("should skip when telemetry exports is nil", func(t *testing.T) {
+			maas := &componentApi.ModelsAsService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: componentApi.ModelsAsServiceInstanceName,
+				},
+				Spec: componentApi.ModelsAsServiceSpec{
+					Telemetry: nil,
+				},
+			}
+
+			cli, err := fakeclient.New()
+			g.Expect(err).ShouldNot(HaveOccurred())
+
+			rr := &types.ReconciliationRequest{
+				Instance:  maas,
+				Client:    cli,
+				Templates: []types.TemplateInfo{},
+			}
+
+			err = configureEnvoyFilter(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(BeEmpty())
+		})
+
+		t.Run("should skip when exports is nil", func(t *testing.T) {
+			maas := &componentApi.ModelsAsService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: componentApi.ModelsAsServiceInstanceName,
+				},
+				Spec: componentApi.ModelsAsServiceSpec{
+					Telemetry: &componentApi.TelemetryConfig{
+						Enabled: boolPtr(true),
+						Exports: nil,
+					},
+				},
+			}
+
+			cli, err := fakeclient.New()
+			g.Expect(err).ShouldNot(HaveOccurred())
+
+			rr := &types.ReconciliationRequest{
+				Instance:  maas,
+				Client:    cli,
+				Templates: []types.TemplateInfo{},
+			}
+
+			err = configureEnvoyFilter(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(BeEmpty())
+		})
+
+		t.Run("should skip when no endpoints configured", func(t *testing.T) {
+			maas := &componentApi.ModelsAsService{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: componentApi.ModelsAsServiceInstanceName,
+				},
+				Spec: componentApi.ModelsAsServiceSpec{
+					Telemetry: &componentApi.TelemetryConfig{
+						Enabled: boolPtr(true),
+						Exports: &componentApi.TelemetryExports{},
+					},
+				},
+			}
+
+			cli, err := fakeclient.New()
+			g.Expect(err).ShouldNot(HaveOccurred())
+
+			rr := &types.ReconciliationRequest{
+				Instance:  maas,
+				Client:    cli,
+				Templates: []types.TemplateInfo{},
+			}
+
+			err = configureEnvoyFilter(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(BeEmpty())
+		})
+
+		t.Run("should skip when EnvoyFilter CRD not available", func(t *testing.T) {
+			lokiEndpoint := testLokiEndpoint
+			maas := createModelsAsServiceWithTelemetry(&lokiEndpoint, nil)
+
+			// Create fake client without EnvoyFilter CRD
+			cli := createFakeClientWithoutGateway()
+
+			rr := &types.ReconciliationRequest{
+				Instance:  maas,
+				Client:    cli,
+				Templates: []types.TemplateInfo{},
+			}
+
+			err := configureEnvoyFilter(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(BeEmpty())
+		})
+	})
+
+	t.Run("Template Addition", func(t *testing.T) {
+		t.Run("should add EnvoyFilter template when exports configured", func(t *testing.T) {
+			lokiEndpoint := testLokiEndpoint
+			maas := createModelsAsServiceWithTelemetry(&lokiEndpoint, nil)
+
+			rr := createReconciliationRequestWithCRD(maas, gvk.EnvoyFilter)
+
+			err := configureEnvoyFilter(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(HaveLen(1))
+			g.Expect(rr.Templates[0].Path).Should(Equal(EnvoyFilterTokenUsageTemplate))
+			g.Expect(rr.Templates[0].FS).Should(Equal(resourcesFS))
+		})
+
+		t.Run("should add EnvoyFilter template with metering endpoint", func(t *testing.T) {
+			meteringEndpoint := testMeteringEndpoint
+			maas := createModelsAsServiceWithTelemetry(nil, &meteringEndpoint)
+
+			rr := createReconciliationRequestWithCRD(maas, gvk.EnvoyFilter)
+
+			err := configureEnvoyFilter(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+			g.Expect(rr.Templates).Should(HaveLen(1))
+		})
+	})
+}
+
+func TestConfigureObservabilityOwnership(t *testing.T) {
+	g := NewWithT(t)
+
+	t.Run("Ownership Configuration", func(t *testing.T) {
+		t.Run("should set OwnerReferences on labeled resources", func(t *testing.T) {
+			maas := createModelsAsServiceWithTelemetry(nil, nil)
+			rr := createReconciliationRequestWithCRD(maas, gvk.OpenTelemetryCollector)
+
+			// Create resource with observability label
+			resource := &unstructured.Unstructured{
+				Object: map[string]any{
+					"apiVersion": "opentelemetry.io/v1beta1",
+					"kind":       "OpenTelemetryCollector",
+					"metadata": map[string]any{
+						"name":      "user-usage",
+						"namespace": "opendatahub",
+						"labels": map[string]any{
+							"app.kubernetes.io/part-of": "maas-observability",
+						},
+					},
+				},
+			}
+			rr.Resources = append(rr.Resources, *resource)
+
+			err := configureObservabilityOwnership(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+
+			ownerRefs := rr.Resources[0].GetOwnerReferences()
+			g.Expect(ownerRefs).Should(HaveLen(1))
+			g.Expect(ownerRefs[0].APIVersion).Should(Equal("components.platform.opendatahub.io/v1alpha1"))
+			g.Expect(ownerRefs[0].Kind).Should(Equal("ModelsAsService"))
+			g.Expect(ownerRefs[0].Name).Should(Equal(maas.Name))
+			g.Expect(ownerRefs[0].UID).Should(Equal(maas.UID))
+			g.Expect(*ownerRefs[0].Controller).Should(BeTrue())
+			g.Expect(*ownerRefs[0].BlockOwnerDeletion).Should(BeTrue())
+		})
+
+		t.Run("should skip resources without observability label", func(t *testing.T) {
+			maas := createModelsAsServiceWithTelemetry(nil, nil)
+			rr := createReconciliationRequestWithCRD(maas, gvk.OpenTelemetryCollector)
+
+			// Create resource without observability label
+			resource := &unstructured.Unstructured{
+				Object: map[string]any{
+					"apiVersion": "opentelemetry.io/v1beta1",
+					"kind":       "OpenTelemetryCollector",
+					"metadata": map[string]any{
+						"name":      "other-collector",
+						"namespace": "opendatahub",
+						"labels": map[string]any{
+							"some-other-label": "value",
+						},
+					},
+				},
+			}
+			rr.Resources = append(rr.Resources, *resource)
+
+			err := configureObservabilityOwnership(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+
+			ownerRefs := rr.Resources[0].GetOwnerReferences()
+			g.Expect(ownerRefs).Should(BeEmpty())
+		})
+
+		t.Run("should handle multiple observability resources", func(t *testing.T) {
+			maas := createModelsAsServiceWithTelemetry(nil, nil)
+			rr := createReconciliationRequestWithCRD(maas, gvk.OpenTelemetryCollector)
+
+			// Create OTel resource
+			otelResource := &unstructured.Unstructured{
+				Object: map[string]any{
+					"apiVersion": "opentelemetry.io/v1beta1",
+					"kind":       "OpenTelemetryCollector",
+					"metadata": map[string]any{
+						"name":      "user-usage",
+						"namespace": "opendatahub",
+						"labels": map[string]any{
+							"app.kubernetes.io/part-of": "maas-observability",
+						},
+					},
+				},
+			}
+			rr.Resources = append(rr.Resources, *otelResource)
+
+			// Create EnvoyFilter resource
+			envoyResource := &unstructured.Unstructured{
+				Object: map[string]any{
+					"apiVersion": "networking.istio.io/v1alpha3",
+					"kind":       "EnvoyFilter",
+					"metadata": map[string]any{
+						"name":      "maas-gateway-envoy-filter",
+						"namespace": "test-gateway-ns",
+						"labels": map[string]any{
+							"app.kubernetes.io/part-of": "maas-observability",
+						},
+					},
+				},
+			}
+			rr.Resources = append(rr.Resources, *envoyResource)
+
+			err := configureObservabilityOwnership(t.Context(), rr)
+			g.Expect(err).ShouldNot(HaveOccurred())
+
+			// Verify both resources have OwnerReferences
+			for _, res := range rr.Resources {
+				ownerRefs := res.GetOwnerReferences()
+				g.Expect(ownerRefs).Should(HaveLen(1))
+				g.Expect(ownerRefs[0].Name).Should(Equal(maas.Name))
+			}
 		})
 	})
 }
