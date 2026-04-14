@@ -1749,6 +1749,24 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled controls whether telemetry resources are deployed.<br />When true, creates TelemetryPolicy for usage metrics and<br />Istio Telemetry for per-subscription latency tracking.<br />Default is true (telemetry enabled). | true | Optional: \{\} <br /> |
 | `metrics` _[MetricsConfig](#metricsconfig)_ | Metrics contains configuration for optional metric dimensions/labels. |  | Optional: \{\} <br /> |
+| `exports` _[TelemetryExports](#telemetryexports)_ | Exports contains endpoints for loki and metering providers that maas uses for usage stats and billing |  | Optional: \{\} <br /> |
+
+
+#### TelemetryExports
+
+
+
+TelemetryExports defines external endpoints for exporting telemetry data.
+
+
+
+_Appears in:_
+- [TelemetryConfig](#telemetryconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `lokiEndpoint` _string_ | LokiEndpoint is the URL endpoint for exporting logs to Loki.<br />If not set, logs are not exported to Loki. |  | Optional: \{\} <br />Pattern: `^https?://.*$` <br /> |
+| `meteringEndpoint` _string_ | MeteringEndpoint is the URL endpoint for exporting metering/billing data.<br />If not set, metering data is not exported to an external system. |  | Optional: \{\} <br />Pattern: `^https?://.*$` <br /> |
 
 
 #### Trainer
