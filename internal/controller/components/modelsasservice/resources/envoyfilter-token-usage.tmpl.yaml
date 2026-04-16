@@ -134,6 +134,12 @@ spec:
                 - key: service.name
                   value:
                     string_value: "maas-gateway"
+                - key: service.namespace
+                  value:
+                    string_value: "{{.GatewayNamespace}}"
+                - key: log_type
+                  value:
+                    string_value: "access-log"
               body:
                 string_value: "%REQ(:METHOD)% %REQ(:PATH)% %RESPONSE_CODE%"
               attributes:
