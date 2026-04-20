@@ -1,0 +1,86 @@
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: user-usage
+  namespace: {{.Namespace}}
+  labels:
+    app.kubernetes.io/part-of: maas-observability
+spec:
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: '0.0.0.0:4317'
+    processors:
+      batch: {}
+      resource:
+        attributes:
+          - action: insert
+            key: log_type
+            value: application
+          - action: upsert
+            key: kubernetes_namespace_name
+            value: {{.Namespace}}
+      # transform:
+      #   log_statements:
+      #     - context: log
+      #       statements:
+      #         # 1. Move all 6 keys from Record Attributes to Resource Attributes
+      #         - set(resource.attributes["organization_id"], attributes["organization_id"])
+      #         - set(resource.attributes["cost_center"], attributes["cost_center"])
+      #         - set(resource.attributes["subscription"], attributes["subscription"])
+      #         - set(resource.attributes["model"], attributes["model"])
+      #         - set(resource.attributes["method"], attributes["method"])
+      #         - set(resource.attributes["response_code"], attributes["response_code"])
+      #
+      #         # 2. Delete them from the original Attributes map (Deduplication)
+      #         - delete_key(attributes, "organization_id")
+      #         - delete_key(attributes, "cost_center")
+      #         - delete_key(attributes, "subscription")
+      #         - delete_key(attributes, "model")
+      #         - delete_key(attributes, "method")
+      #         - delete_key(attributes, "response_code")
+      groupbyattrs:
+        keys:
+          - subscription
+          - model
+          - method
+          - response_code
+    exporters:
+{{- if .HasLoki}}
+      otlphttp/loki:
+        auth:
+          authenticator: bearertokenauth
+        endpoint: {{.LokiEndpoint}}
+        tls:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+          insecure_skip_verify: true
+{{- end}}
+{{- if .HasMetering}}
+      otlp_grpc/openmeter:
+        endpoint: {{.MeteringEndpoint}}
+        tls:
+          insecure: true
+{{- end}}
+    extensions:
+{{- if .HasLoki}}
+      bearertokenauth:
+        filename: /var/run/secrets/kubernetes.io/serviceaccount/token
+{{- end}}
+    service:
+      extensions:
+{{- if .HasLoki}}
+        - bearertokenauth
+{{- end}}
+      pipelines:
+        logs:
+          receivers: [otlp]
+          processors: [resource, groupbyattrs, batch]
+          exporters:
+{{- if .HasLoki}}
+            - otlphttp/loki
+{{- end}}
+{{- if .HasMetering}}
+            - otlp_grpc/openmeter
+{{- end}}

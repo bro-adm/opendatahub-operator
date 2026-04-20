@@ -1,0 +1,236 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: maas-gateway-envoy-filter
+  namespace: {{.GatewayNamespace}}
+  labels:
+    app.kubernetes.io/part-of: maas-observability
+spec:
+  workloadSelector:
+    labels:
+      gateway.networking.k8s.io/gateway-name: {{.GatewayName}}
+  configPatches:
+  # --- Cluster for OTel Collector gRPC endpoint ---
+  - applyTo: CLUSTER
+    patch:
+      operation: ADD
+      value:
+        name: otel_als_cluster
+        type: STRICT_DNS
+        connect_timeout: 5s
+        http2_protocol_options: {}
+        load_assignment:
+          cluster_name: otel_als_cluster
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: {{.OTelEndpoint}}
+                    port_value: 4317
+  # --- Extract token usage from LLM response body into dynamic metadata ---
+  # Native Envoy C++ filter (available since Envoy 1.28; OpenShift Gateway ships 1.35).
+  # Parses JSON response body and sets fields as dynamic metadata for the access log.
+  - applyTo: HTTP_FILTER
+    match:
+      context: GATEWAY
+      listener:
+        filterChain:
+          filter:
+            name: envoy.filters.network.http_connection_manager
+            subFilter:
+              name: envoy.filters.http.router
+    patch:
+      operation: INSERT_BEFORE
+      value:
+        name: envoy.filters.http.json_to_metadata
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.http.json_to_metadata.v3.JsonToMetadata
+          response_rules:
+            rules:
+            - selectors:
+              - key: usage
+              - key: total_tokens
+              on_present:
+                metadata_namespace: envoy.filters.http.json_to_metadata
+                key: tokens_total
+                type: NUMBER
+              on_missing:
+                metadata_namespace: envoy.filters.http.json_to_metadata
+                key: tokens_total
+                value: "0"
+              on_error:
+                metadata_namespace: envoy.filters.http.json_to_metadata
+                key: tokens_total
+                value: "0"
+            - selectors:
+              - key: usage
+              - key: prompt_tokens
+              on_present:
+                metadata_namespace: envoy.filters.http.json_to_metadata
+                key: tokens_prompt
+                type: NUMBER
+              on_missing:
+                metadata_namespace: envoy.filters.http.json_to_metadata
+                key: tokens_prompt
+                value: "0"
+              on_error:
+                metadata_namespace: envoy.filters.http.json_to_metadata
+                key: tokens_prompt
+                value: "0"
+            - selectors:
+              - key: usage
+              - key: completion_tokens
+              on_present:
+                metadata_namespace: envoy.filters.http.json_to_metadata
+                key: tokens_completion
+                type: NUMBER
+              on_missing:
+                metadata_namespace: envoy.filters.http.json_to_metadata
+                key: tokens_completion
+                value: "0"
+              on_error:
+                metadata_namespace: envoy.filters.http.json_to_metadata
+                key: tokens_completion
+                value: "0"
+            - selectors:
+              - key: model
+              on_present:
+                metadata_namespace: envoy.filters.http.json_to_metadata
+                key: model
+              on_missing:
+                metadata_namespace: envoy.filters.http.json_to_metadata
+                key: model
+                value: ""
+              on_error:
+                metadata_namespace: envoy.filters.http.json_to_metadata
+                key: model
+                value: ""
+  # --- OTel access log with all structured attributes ---
+  - applyTo: NETWORK_FILTER
+    match:
+      context: GATEWAY
+      listener:
+        filterChain:
+          filter:
+            name: envoy.filters.network.http_connection_manager
+    patch:
+      operation: MERGE
+      value:
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          access_log:
+          - name: envoy.access_loggers.open_telemetry
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.access_loggers.open_telemetry.v3.OpenTelemetryAccessLogConfig
+              common_config:
+                log_name: maas-usage-log
+                transport_api_version: V3
+                grpc_service:
+                  envoy_grpc:
+                    cluster_name: otel_als_cluster
+              resource_attributes:
+                values:
+                - key: service.name
+                  value:
+                    string_value: "maas-gateway"
+                - key: service.namespace
+                  value:
+                    string_value: "{{.GatewayNamespace}}"
+                - key: log_type
+                  value:
+                    string_value: "access-log"
+              body:
+                string_value: "%REQ(:METHOD)% %REQ(:PATH)% %RESPONSE_CODE%"
+              attributes:
+                values:
+                - key: request_id
+                  value:
+                    string_value: "%REQ(X-REQUEST-ID)%"
+                - key: method
+                  value:
+                    string_value: "%REQ(:METHOD)%"
+                - key: path
+                  value:
+                    string_value: "%REQ(:PATH)%"
+                - key: authority
+                  value:
+                    string_value: "%REQ(:AUTHORITY)%"
+
+                - key: response_code
+                  value:
+                    string_value: "%RESPONSE_CODE%"
+                - key: upstream_cluster
+                  value:
+                    string_value: "%UPSTREAM_CLUSTER%"
+                - key: duration_ms
+                  value:
+                    string_value: "%DURATION%"
+                - key: bytes_received
+                  value:
+                    string_value: "%BYTES_RECEIVED%"
+                - key: bytes_sent
+                  value:
+                    string_value: "%BYTES_SENT%"
+                - key: response_code_details
+                  value:
+                    string_value: "%RESPONSE_CODE_DETAILS%"
+                - key: downstream_remote_address
+                  value:
+                    string_value: "%DOWNSTREAM_REMOTE_ADDRESS%"
+                - key: route_name
+                  value:
+                    string_value: "%ROUTE_NAME%"
+
+                # --- IDENTITY DATA (From Authorino/Kuadrant via ext_authz) ---
+                - key: user_id
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:identity:userid)%"
+                - key: subscription
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:identity:selected_subscription)%"
+                - key: subscription_labels
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:identity:subscription_labels)%"
+                - key: organization_id
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:identity:organizationId)%"
+                - key: groups
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:identity:groups_str)%"
+                - key: cost_center
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:identity:costCenter)%"
+                - key: key_id
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:identity:keyId)%"
+                - key: auth_error
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:identity:subscription_error)%"
+                - key: auth_error_msg
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:identity:subscription_error_message)%"
+
+                # AuthPolicy response.success.headers uses set semantics (overwrites
+                # any client-supplied value, so spoofing is not possible on
+                # authenticated requests. On 401/403, the header is absent (shows "-").
+
+                # - key: user_id
+                #   value:
+                #     string_value: "%REQ(x-maas-user-id)%"
+                # - key: subscription
+                #   value:
+                #     string_value: "%REQ(x-maas-subscription-id)%"
+
+                - key: tokens_total
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.json_to_metadata:tokens_total)%"
+                - key: tokens_prompt
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.json_to_metadata:tokens_prompt)%"
+                - key: tokens_completion
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.json_to_metadata:tokens_completion)%"
+                - key: model
+                  value:
+                    string_value: "%DYNAMIC_METADATA(envoy.filters.http.json_to_metadata:model)%"

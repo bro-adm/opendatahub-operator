@@ -51,6 +51,7 @@ import (
 	infrav1 "github.com/opendatahub-io/opendatahub-operator/v2/api/infrastructure/v1"
 	serviceApi "github.com/opendatahub-io/opendatahub-operator/v2/api/services/v1alpha1"
 	dscictrl "github.com/opendatahub-io/opendatahub-operator/v2/internal/controller/dscinitialization"
+	"github.com/opendatahub-io/opendatahub-operator/v2/pkg/operatorconfig"
 	"github.com/opendatahub-io/opendatahub-operator/v2/tests/envtestutil"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -96,8 +97,8 @@ var _ = BeforeSuite(func() {
 		CRDInstallOptions: envtest.CRDInstallOptions{
 			Scheme: testScheme,
 			Paths: []string{
-				filepath.Join(rootPath, "odh-config", "crd", "bases"),
-				filepath.Join(rootPath, "odh-config", "crd", "external"),
+				filepath.Join(rootPath, "config", "crd", "bases"),
+				filepath.Join(rootPath, "config", "crd", "external"),
 			},
 			ErrorIfPathMissing: true,
 			CleanUpAfterUse:    false,
@@ -162,7 +163,10 @@ var _ = BeforeSuite(func() {
 	err = (&dscictrl.DSCInitializationReconciler{
 		Client:   k8sClient,
 		Scheme:   testScheme,
-		Recorder: mgr.GetEventRecorderFor("dscinitialization-controller"),
+		Recorder: mgr.GetEventRecorder("dscinitialization-controller"),
+		OperatorSettings: operatorconfig.OperatorSettings{
+			ManifestsBasePath: "",
+		},
 	}).SetupWithManager(gCtx, mgr)
 
 	Expect(err).ToNot(HaveOccurred())

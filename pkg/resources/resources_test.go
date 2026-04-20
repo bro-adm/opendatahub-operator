@@ -178,7 +178,7 @@ func TestRemoveOwnerRef(t *testing.T) {
 		CRDInstallOptions: envtest.CRDInstallOptions{
 			Scheme: s,
 			Paths: []string{
-				filepath.Join(projectDir, "odh-config", "crd", "bases"),
+				filepath.Join(projectDir, "config", "crd", "bases"),
 			},
 			ErrorIfPathMissing: true,
 			CleanUpAfterUse:    false,
@@ -371,9 +371,6 @@ func TestHasCRD(t *testing.T) {
 				Served:  true,
 				Storage: true,
 			}},
-		},
-		Status: apiextensionsv1.CustomResourceDefinitionStatus{
-			StoredVersions: []string{crdGVK.Version},
 		},
 	}
 

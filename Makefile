@@ -29,7 +29,7 @@ ifeq ($(ODH_PLATFORM_TYPE), OpenDataHub)
 	# - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
 	# - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
 	ifeq ($(VERSION), )
-		VERSION = 3.2.0
+		VERSION = 3.3.0
 	endif
 	# Specifies the namespace where the operator pods are deployed (defaults to opendatahub-operator-system)
 	OPERATOR_NAMESPACE ?= opendatahub-operator-system
@@ -37,6 +37,8 @@ ifeq ($(ODH_PLATFORM_TYPE), OpenDataHub)
 	APPLICATIONS_NAMESPACE ?= opendatahub
 	# Specifies the namespace where the workbenches are deployed (defaults to opendatahub)
 	WORKBENCHES_NAMESPACE ?= opendatahub
+	# Specifies the namespace where monitoring is deployed (defaults to opendatahub)
+	MONITORING_NAMESPACE ?= opendatahub
 	CHANNELS ?= fast
 	ROLE_NAME=controller-manager-role
 	BUNDLE_DIR ?= odh-bundle
@@ -44,8 +46,13 @@ ifeq ($(ODH_PLATFORM_TYPE), OpenDataHub)
 	BUNDLE_DOCKERFILE_FILENAME=bundle.Dockerfile
 	OPERATOR_PACKAGE=opendatahub-operator
 	CONTROLLER_GEN_TAGS=--load-build-tags=odh
-	CONFIG_DIR=odh-config
+	CONFIG_DIR=config
 	GO_RUN_ARGS=-tags=odh
+	RHAII_CONFIG_DIR=config/rhaii
+	RHAII_DEFAULT_CONFIG_DIR=$(RHAII_CONFIG_DIR)/odh
+	RHAII_LOCAL_CONFIG_DIR=$(RHAII_CONFIG_DIR)/odh-local
+	CCM_DEPLOY_OVERLAY=default
+	CCM_LOCAL_OVERLAY=local
 else
 	# VERSION defines the project version for the bundle.
 	# Update this value when you upgrade the version of your project.
@@ -54,14 +61,16 @@ else
 	# - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
 	# NOTE: see also the git branches for RHOAI in get_all_manifests.sh. This variable does NOT affect those
 	ifeq ($(VERSION), )
-		VERSION = 3.2.0
+		VERSION = 3.3.0
 	endif
-	# Specifies the namespace where the operator pods are deployed (defaults to opendatahub-operator-system)
-	OPERATOR_NAMESPACE ?= opendatahub-operator-system
-	# Specifies the namespace where the component deployments are deployed (defaults to opendatahub)
+	# Specifies the namespace where the operator pods are deployed (defaults to redhat-ods-operator)
+	OPERATOR_NAMESPACE ?= redhat-ods-operator
+	# Specifies the namespace where the component deployments are deployed (defaults to redhat-ods-applications)
 	APPLICATIONS_NAMESPACE ?= redhat-ods-applications
-	# Specifies the namespace where the workbenches are deployed (defaults to opendatahub)
+	# Specifies the namespace where the workbenches are deployed (defaults to rhods-notebooks)
 	WORKBENCHES_NAMESPACE ?= rhods-notebooks
+	# Specifies the namespace where monitoring is deployed (defaults to redhat-ods-monitoring)
+	MONITORING_NAMESPACE ?= redhat-ods-monitoring
 	CHANNELS ?= alpha,stable,fast
 	DEFAULT_CHANNEL ?= stable
 	ROLE_NAME=rhods-operator-role
@@ -70,12 +79,18 @@ else
 	BUNDLE_DOCKERFILE_FILENAME=rhoai-bundle.Dockerfile
 	OPERATOR_PACKAGE=rhods-operator
 	CONTROLLER_GEN_TAGS=--load-build-tags=rhoai
-	CONFIG_DIR=rhoai-config
+	CONFIG_DIR=config/rhoai
 	GO_RUN_ARGS=-tags=rhoai
+	RHAII_CONFIG_DIR=config/rhaii/rhoai
+	RHAII_DEFAULT_CONFIG_DIR=$(RHAII_CONFIG_DIR)/default
+	RHAII_LOCAL_CONFIG_DIR=$(RHAII_CONFIG_DIR)/default
+	CCM_DEPLOY_OVERLAY=rhoai
+	CCM_LOCAL_OVERLAY=rhoai
 endif
 
 IMAGE_BUILDER ?= podman
 DEFAULT_MANIFESTS_PATH ?= opt/manifests
+DEFAULT_CHARTS_PATH ?= opt/charts
 CGO_ENABLED ?= 1
 USE_LOCAL = false
 
@@ -119,13 +134,15 @@ GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 GINKGO ?= $(LOCALBIN)/ginkgo
 YQ ?= $(LOCALBIN)/yq
+HELM ?= $(LOCALBIN)/helm
 
 ## Tool Versions
-KUSTOMIZE_VERSION ?= v5.7.0
+KUSTOMIZE_VERSION ?= v5.8.1
 CONTROLLER_TOOLS_VERSION ?= v0.17.3
 OPERATOR_SDK_VERSION ?= v1.39.2
 GOLANGCI_LINT_VERSION ?= v2.5.0
 YQ_VERSION ?= v4.12.2
+HELM_VERSION ?= v4.1.1
 KUBE_LINTER_VERSION ?= v0.7.6
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
@@ -133,7 +150,7 @@ ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
 CRD_REF_DOCS_VERSION = 0.2.0
 # Add to tool versions section
-GINKGO_VERSION ?= v2.23.4
+GINKGO_VERSION ?= v2.28.1
 
 
 PLATFORM ?= linux/amd64
@@ -196,6 +213,10 @@ default: manifests generate lint unit-test build
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
+.PHONY: print-VERSION
+print-VERSION:
+	@echo $(VERSION)
+
 ##@ Development
 
 define go-mod-version
@@ -220,16 +241,59 @@ $(if $(3),,mv $(CONFIG_DIR)/crd/external/tmp/*.yaml $(CONFIG_DIR)/crd/external/)
 rm -rf $(CONFIG_DIR)/crd/external/tmp
 endef
 
+# Add all CRD base files to kustomization.yaml, skipping kustomization.yaml itself
+# and avoiding duplicates by checking if each resource is already present
+define add-crd-to-kustomization
+mkdir -p $(1) && \
+cd $(1) && \
+rm -f kustomization.yaml && \
+$(KUSTOMIZE) create --autodetect && \
+cd -
+endef
+
+# Dynamically compute paths for main operator manifests, excluding cloud manager packages
+manifests-paths := {$(shell go list ./... | grep -v /cloudmanager | tr '\n' ',')}
+
 .PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+manifests: controller-gen kustomize yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 ifneq ($(ODH_PLATFORM_TYPE), OpenDataHub)
-	$(CONTROLLER_GEN) rbac:roleName=controller-manager-role paths="./..." output:rbac:artifacts:config=odh-config/rbac
+	@$(CONTROLLER_GEN) rbac:roleName=controller-manager-role paths="$(manifests-paths)" output:rbac:artifacts:config=config/rbac
 endif
-	$(CONTROLLER_GEN) $(CONTROLLER_GEN_TAGS) rbac:roleName=$(ROLE_NAME) crd:ignoreUnexportedFields=true webhook paths="./..." output:crd:artifacts:config=$(CONFIG_DIR)/crd/bases output:rbac:artifacts:config=$(CONFIG_DIR)/rbac output:webhook:artifacts:config=$(CONFIG_DIR)/webhook
-	$(call fetch-external-crds,github.com/openshift/api,route/v1)
-	$(call fetch-external-crds,github.com/openshift/api,user/v1)
-	$(call fetch-external-crds,github.com/openshift/api,config/v1,authentications)
-CLEANFILES += odh-config/crd/bases rhoai-config/crd/bases odh-config/crd/external rhoai-config/crd/external odh-config/rbac/role.yaml rhoai-config/rbac/role.yaml odh-config/webhook/manifests.yaml rhoai-config/webhook/manifests.yaml
+	@$(CONTROLLER_GEN) $(CONTROLLER_GEN_TAGS) rbac:roleName=$(ROLE_NAME) crd:ignoreUnexportedFields=true webhook paths="$(manifests-paths)" output:crd:artifacts:config=$(CONFIG_DIR)/crd/bases output:rbac:artifacts:config=$(CONFIG_DIR)/rbac output:webhook:artifacts:config=$(CONFIG_DIR)/webhook
+	@$(call add-crd-to-kustomization,$(CONFIG_DIR)/crd/bases)
+	@$(call fetch-external-crds,github.com/openshift/api,route/v1)
+	@$(call fetch-external-crds,github.com/openshift/api,user/v1)
+	@$(call fetch-external-crds,github.com/openshift/api,config/v1,authentications ingresses)
+	@$(call fetch-external-crds,github.com/openshift/api,oauth/v1)
+	@# Copy IngressController CRD for gateway LoadBalancer mode (envtest integration tests)
+	@rm -f $(CONFIG_DIR)/crd/external/0000_50_ingress-operator_00-ingresscontroller.crd.yaml
+	@cp $(shell go env GOPATH)/pkg/mod/github.com/openshift/api@$(call go-mod-version,github.com/openshift/api)/operator/v1/0000_50_ingress-operator_00-ingresscontroller.crd.yaml $(CONFIG_DIR)/crd/external/
+	@# Copy Gateway API CRDs from Go module cache
+	@# rm -f first to handle CI environments where cached files may have restrictive permissions
+	@rm -f $(CONFIG_DIR)/crd/external/gateway.networking.k8s.io_*.yaml
+	@cp $(shell go env GOPATH)/pkg/mod/sigs.k8s.io/gateway-api@$(call go-mod-version,sigs.k8s.io/gateway-api)/config/crd/standard/*.yaml $(CONFIG_DIR)/crd/external/
+	@# Fix OpenShift CRD scopes (OpenShift API incorrectly marks them as Namespaced, but they're Cluster-scoped)
+	@$(SED_COMMAND) -i'' -e 's/scope: Namespaced/scope: Cluster/' $(CONFIG_DIR)/crd/external/config.openshift.io_ingresses.yaml
+	@$(SED_COMMAND) -i'' -e 's/scope: Namespaced/scope: Cluster/' $(CONFIG_DIR)/crd/external/config.openshift.io_authentications.yaml
+	@$(SED_COMMAND) -i'' -e 's/scope: Namespaced/scope: Cluster/' $(CONFIG_DIR)/crd/external/oauth.openshift.io_oauthclients.yaml
+	@# Copy KServe CRD to shared rhaii overlay and generate kustomization
+	@mkdir -p config/rhaii/crd/bases
+	@cp $(CONFIG_DIR)/crd/bases/components.platform.opendatahub.io_kserves.yaml config/rhaii/crd/bases/
+	@$(call add-crd-to-kustomization,config/rhaii/crd/bases)
+	@# Generate shared rhaii webhook manifests with only KServe connection webhooks
+	@$(YQ) eval 'select(.kind == "MutatingWebhookConfiguration") | .webhooks = [.webhooks[] | select(.name == "connection-isvc.opendatahub.io" or .name == "connection-llmisvc.opendatahub.io")]' $(CONFIG_DIR)/webhook/manifests.yaml > config/rhaii/webhook/manifests.yaml
+MANIFEST_GENERATED_FILES = config/crd/bases config/rhoai/crd/bases config/rhaii/crd/bases config/crd/external config/rhoai/crd/external config/rbac/role.yaml config/rhoai/rbac/role.yaml config/webhook/manifests.yaml config/rhoai/webhook/manifests.yaml config/rhaii/webhook/manifests.yaml
+
+.PHONY: manifests-all
+manifests-all:
+	$(MAKE) manifests
+	$(MAKE) manifests ODH_PLATFORM_TYPE=rhoai
+	$(MAKE) manifests-ccm
+
+.PHONY: clean-manifests
+clean-manifests: ## Remove generated manifest files (CRDs, RBAC, webhooks) for all variants.
+	rm -rf -- $(MANIFEST_GENERATED_FILES)
+	$(foreach p,$(CCM_PROVIDERS),rm -rf -- "$(call ccm-config-dir,$(p))/crd/bases" "$(call ccm-config-dir,$(p))/rbac/role.yaml" "$(call ccm-config-dir,$(p))/webhook/manifests.yaml";)
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -259,13 +323,15 @@ lint-fix: golangci-lint ## Run golangci-lint against code.
 .PHONY: kube-lint
 kube-lint: prepare ## Run kube-linter against rendered manifests.
 	@TMP_FILE=$$(mktemp /tmp/kube-lint.XXXXXX.yaml) && \
-	$(KUSTOMIZE) build --load-restrictor LoadRestrictionsNone $(CONFIG_DIR)/manifests > $$TMP_FILE && \
+	$(KUSTOMIZE) build $(CONFIG_DIR)/manifests > $$TMP_FILE && \
 	go run golang.stackrox.io/kube-linter/cmd/kube-linter@$(KUBE_LINTER_VERSION) lint --config .kube-linter.yaml $$TMP_FILE && \
 	rm -f $$TMP_FILE
 
 .PHONY: get-manifests
 get-manifests: ## Fetch components manifests from remote git repo
 	ODH_PLATFORM_TYPE=$(ODH_PLATFORM_TYPE) VERSION=$(VERSION) ./get_all_manifests.sh
+	@echo "Validating manifest image tags..."
+	@./.github/scripts/validate-manifest-images.sh
 CLEANFILES += opt/manifests/*
 
 # Default to standard sed command
@@ -284,6 +350,7 @@ api-docs: crd-ref-docs ## Creates API docs using https://github.com/elastic/crd-
 	$(CRD_REF_DOCS) --source-path ./ --output-path ./docs/api-overview.md --renderer markdown --config ./crd-ref-docs.config.yaml && \
 	grep -Ev '\.io/[^v][^1].*)$$' ./docs/api-overview.md > temp.md && mv ./temp.md ./docs/api-overview.md && \
 	$(SED_COMMAND) -i "s|](#managementstate)|](https://pkg.go.dev/github.com/openshift/api@v0.0.0-20250812222054-88b2b21555f3/operator/v1#ManagementState)|g" ./docs/api-overview.md
+	$(CRD_REF_DOCS) --source-path ./api/cloudmanager/ --output-path ./docs/cloudmanager-api-overview.md --renderer markdown --config ./crd-ref-docs.cloudmanager.config.yaml
 
 .PHONY: ginkgo
 ginkgo: $(GINKGO)
@@ -320,6 +387,16 @@ image-push: ## Push image with the manager.
 .PHONY: image
 image: image-build image-push ## Build and push image with the manager.
 
+.PHONY: image-kind-load
+image-kind-load:
+	$(IMAGE_BUILDER) save -o image.tar $(IMG)
+	kind load image-archive image.tar $(if $(KIND_CLUSTER_NAME),--name $(KIND_CLUSTER_NAME))
+	rm -rf image.tar
+
+.PHONY: e2e-test-ccm
+e2e-test-ccm: ## Run cloud manager e2e tests (requires CLOUD_MANAGER_PROVIDER, e.g. azure)
+	go test -v -count=1 -timeout=30m ./tests/e2e/cloudmanager/
+
 ##@ Deployment
 
 ifndef ignore-not-found
@@ -327,7 +404,7 @@ ifndef ignore-not-found
 endif
 
 .PHONY: prepare
-prepare: manifests kustomize manager-kustomization
+prepare: kustomize manifests manager-kustomization
 
 # phony target for the case of changing IMG variable
 .PHONY: manager-kustomization
@@ -338,19 +415,31 @@ manager-kustomization: $(CONFIG_DIR)/manager/kustomization.yaml.in
 
 .PHONY: install
 install: prepare ## Install CRDs into the K8s cluster specified in ~/.kube/config.
-	$(KUSTOMIZE) build $(CONFIG_DIR)/crd | kubectl apply -f -
+	$(KUSTOMIZE) build $(CONFIG_DIR)/crd/bases | kubectl apply -f -
 
 .PHONY: uninstall
 uninstall: prepare ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	$(KUSTOMIZE) build $(CONFIG_DIR)/crd | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
+	$(KUSTOMIZE) build $(CONFIG_DIR)/crd/bases | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: deploy
 deploy: prepare ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	$(KUSTOMIZE) build --load-restrictor LoadRestrictionsNone $(CONFIG_DIR)/default | kubectl apply --namespace $(OPERATOR_NAMESPACE) -f -
+	$(KUSTOMIZE) build $(CONFIG_DIR)/default | kubectl apply --namespace $(OPERATOR_NAMESPACE) -f -
+
+.PHONY: deploy-rhaii
+deploy-rhaii: prepare ## Deploy controller in rhaii mode (only KServe) to the K8s cluster specified in ~/.kube/config.
+	$(KUSTOMIZE) build $(RHAII_DEFAULT_CONFIG_DIR) | $(SED_COMMAND) 's/REPLACE_RHAI_VERSION/$(VERSION)/g' | kubectl apply --namespace $(OPERATOR_NAMESPACE) -f -
+
+.PHONY: deploy-rhaii-local
+deploy-rhaii-local: prepare ## Deploy controller in rhaii mode (only KServe, local image pull policy) to the K8s cluster specified in ~/.kube/config.
+	$(KUSTOMIZE) build $(RHAII_LOCAL_CONFIG_DIR) | $(SED_COMMAND) 's/REPLACE_RHAI_VERSION/$(VERSION)/g' | kubectl apply --namespace $(OPERATOR_NAMESPACE) -f -
+
+.PHONY: undeploy-rhaii
+undeploy-rhaii: prepare ## Undeploy rhaii controller from the K8s cluster specified in ~/.kube/config.
+	$(KUSTOMIZE) build $(RHAII_DEFAULT_CONFIG_DIR) | $(SED_COMMAND) 's/REPLACE_RHAI_VERSION/$(VERSION)/g' | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: undeploy
 undeploy: prepare ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	$(KUSTOMIZE) build --load-restrictor LoadRestrictionsNone $(CONFIG_DIR)/default | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
+	$(KUSTOMIZE) build $(CONFIG_DIR)/default | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
@@ -373,6 +462,11 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 yq: $(YQ) ## Download yq locally if necessary.
 $(YQ): $(LOCALBIN)
 	$(call go-install-tool,$(YQ),github.com/mikefarah/yq/v4,$(YQ_VERSION))
+
+.PHONY: helm
+helm: $(HELM) ## Download helm locally if necessary.
+$(HELM): $(LOCALBIN)
+	$(call go-install-tool,$(HELM),helm.sh/helm/v4/cmd/helm,$(HELM_VERSION))
 
 OPERATOR_SDK_DL_URL ?= https://github.com/operator-framework/operator-sdk/releases/download/$(OPERATOR_SDK_VERSION)
 .PHONY: operator-sdk
@@ -408,7 +502,7 @@ WARNINGMSG = "provided API should have an example annotation"
 .PHONY: bundle
 bundle: prepare operator-sdk ## Generate bundle manifests and metadata, then validate generated files.
 	$(OPERATOR_SDK) generate kustomize manifests --package $(OPERATOR_PACKAGE) --input-dir $(CONFIG_DIR)/manifests --output-dir $(CONFIG_DIR)/manifests -q
-	$(KUSTOMIZE) build --load-restrictor LoadRestrictionsNone $(CONFIG_DIR)/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS) --package $(OPERATOR_PACKAGE) --kustomize-dir $(CONFIG_DIR)/manifests --output-dir $(BUNDLE_DIR) 2>&1 | grep -v $(WARNINGMSG)
+	$(KUSTOMIZE) build $(CONFIG_DIR)/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS) --package $(OPERATOR_PACKAGE) --kustomize-dir $(CONFIG_DIR)/manifests --output-dir $(BUNDLE_DIR) 2>&1 | grep -v $(WARNINGMSG)
 	$(OPERATOR_SDK) bundle validate ./$(BUNDLE_DIR) 2>&1 | grep -v $(WARNINGMSG)
 	$(SED_COMMAND) -i 's#COPY #COPY --from=builder /workspace/#' bundle.Dockerfile
 	cat Dockerfiles/build-bundle.Dockerfile bundle.Dockerfile > Dockerfiles/$(BUNDLE_DOCKERFILE_FILENAME)
@@ -416,6 +510,11 @@ bundle: prepare operator-sdk ## Generate bundle manifests and metadata, then val
 	rm -f $(BUNDLE_DIR)/manifests/opendatahub-operator-webhook-service_v1_service.yaml
 	rm -f $(BUNDLE_DIR)/manifests/rhods-operator-webhook-service_v1_service.yaml
 CLEANFILES += rhoai-bundle odh-bundle
+
+.PHONY: bundle-all
+bundle-all:
+	$(MAKE) bundle
+	$(MAKE) bundle ODH_PLATFORM_TYPE=rhoai
 
 # The bundle image is multi-stage to preserve the ability to build without invoking make
 # We use build args to ensure the variables are passed to the underlying internal make invocation
@@ -476,8 +575,9 @@ catalog-clean: ## Clean up catalog files and Dockerfile
 .PHONY: catalog-prepare
 catalog-prepare: catalog-clean opm yq ## Prepare the catalog by adding bundles to fast channel. It requires BUNDLE_IMG exists before running the target"
 	mkdir -p catalog
-	cp odh-config/catalog/fbc-basic-template.yaml catalog/fbc-basic-template.yaml
-	./hack/update-catalog-template.sh catalog/fbc-basic-template.yaml $(BUNDLE_IMGS)
+	cp config/catalog/fbc-basic-template.yaml catalog/fbc-basic-template.yaml
+	$(SED_COMMAND) -i 's/opendatahub-operator/$(OPERATOR_PACKAGE)/g' catalog/fbc-basic-template.yaml
+	./hack/update-catalog-template.sh catalog/fbc-basic-template.yaml $(BUNDLE_IMGS) $(YQ) $(OPERATOR_PACKAGE)
 	$(OPM) alpha render-template basic \
 		--migrate-level=bundle-object-to-csv-metadata \
 		-o yaml \
@@ -497,7 +597,7 @@ catalog-build: catalog-prepare
 catalog-push: ## Push a catalog image.
 	$(MAKE) image-push IMG=$(CATALOG_IMG)
 
-TOOLBOX_GOLANG_VERSION := 1.24.6
+TOOLBOX_GOLANG_VERSION := 1.25.0
 
 # Generate a Toolbox container for locally testing changes easily
 .PHONY: toolbox
@@ -511,7 +611,7 @@ toolbox: ## Create a toolbox instance with the proper Golang and Operator SDK ve
 	toolbox create opendatahub-toolbox --image localhost/opendatahub-toolbox:latest
 
 # Run tests.
-TEST_SRC ?=./internal/... ./tests/integration/... ./pkg/...
+TEST_SRC ?=./internal/... ./tests/integration/... ./pkg/... ./api/services/v1alpha1/...
 
 .PHONY: envtest
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
@@ -522,16 +622,19 @@ $(ENVTEST): $(LOCALBIN)
 test: unit-test e2e-test
 
 .PHONY: unit-test
-unit-test: envtest ginkgo # directly use ginkgo since the framework is not compatible with go test parallel
+unit-test: unit-test-operator unit-test-clusterhealth
+
+.PHONY: unit-test-operator
+unit-test-operator: envtest ginkgo # directly use ginkgo since the framework is not compatible with go test parallel
 	@if [ ! -d "$(CONFIG_DIR)/crd/bases" ]; then \
-		echo "Error: $(CONFIG_DIR)/crd/bases folder does not exist. Please run 'make manifests' first."; \
+		echo "Error: $(CONFIG_DIR)/crd/bases folder does not exist. Please run 'make manifests-all' first."; \
 		exit 1; \
 	fi
 	OPERATOR_NAMESPACE=$(OPERATOR_NAMESPACE) KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
     	${GINKGO} -r \
         		--procs=8 \
         		--compilers=2 \
-        		--timeout=15m \
+        		--timeout=20m \
         		--poll-progress-after=30s \
         		--poll-progress-interval=5s \
         		--randomize-all \
@@ -540,8 +643,13 @@ unit-test: envtest ginkgo # directly use ginkgo since the framework is not compa
         		--cover \
         		--coverprofile=cover.out \
         		--succinct \
+        		--skip-package=pkg/clusterhealth,cmd/health-check \
         		$(TEST_SRC)
 CLEANFILES += cover.out
+
+.PHONY: unit-test-clusterhealth
+unit-test-clusterhealth:
+	cd pkg/clusterhealth && go test -cover ./...
 
 # Pattern rule to generate .rules.yaml from PrometheusRule templates
 # This finds the corresponding *-prometheusrules.tmpl.yaml in the same directory
@@ -591,7 +699,18 @@ check-prometheus-alert-unit-tests: $(PROMETHEUS_ALERT_RULES)
 	./tests/prometheus_unit_tests/scripts/check_alert_tests.sh $(PROMETHEUS_RULES_DIR) $(ALERT_SEVERITY)
 CLEANFILES += $(PROMETHEUS_ALERT_RULES)
 
-.PHONY: e2e-test
+# Cluster health targets (cluster-health, cluster-health-*, etc.) are in cmd/health-check/Makefile.
+ifneq (,$(wildcard cmd/health-check/Makefile))
+include cmd/health-check/Makefile
+endif
+
+# MCP server targets (mcp-server, mcp-server-test) are in cmd/mcp-server/Makefile.
+ifneq (,$(wildcard cmd/mcp-server/Makefile))
+include cmd/mcp-server/Makefile
+endif
+
+.PHONY: e2e-test e2e
+e2e: e2e-test ## Alias for e2e-test
 e2e-test:
 # Specifies the namespace where the operator pods are deployed
 ifndef E2E_TEST_OPERATOR_NAMESPACE
@@ -605,17 +724,184 @@ endif
 ifndef E2E_TEST_WORKBENCHES_NAMESPACE
 export E2E_TEST_WORKBENCHES_NAMESPACE = $(WORKBENCHES_NAMESPACE)
 endif
+# Specifies the namespace where monitoring is deployed
+ifndef E2E_TEST_DSC_MONITORING_NAMESPACE
+export E2E_TEST_DSC_MONITORING_NAMESPACE = $(MONITORING_NAMESPACE)
+endif
 ifdef ARTIFACT_DIR
 export JUNIT_OUTPUT_PATH = ${ARTIFACT_DIR}/junit_report.xml
 endif
 e2e-test:
 	go run -C ./cmd/test-retry main.go e2e --verbose --working-dir=$(CURDIR) $(if $(JUNIT_OUTPUT_PATH),--junit-output=$(JUNIT_OUTPUT_PATH)) -- ${E2E_TEST_FLAGS}
 
+.PHONY: e2e-test-single
+e2e-test-single:
+# Run a single E2E test function (usage: make e2e-test-single TEST="<test-path>")
+ifndef TEST
+	$(error TEST is required. Usage: make e2e-test-single TEST="TestOdhOperator/Component_Tests/dashboard/Validate component enabled")
+endif
+	@echo "Running single test: $(TEST)"
+	E2E_TEST_DELETION_POLICY=never E2E_TEST_CLEAN_UP_PREVIOUS_RESOURCES=false go test ./tests/e2e/ -run "$(TEST)" -timeout=10m -v
+
+.PHONY: e2e-setup-cluster
+e2e-setup-cluster:
+# Setup cluster prerequisites (DSCI/DSC) by running e2e-test with most suites disabled
+# (operator-controller tests may still execute unless explicitly disabled)
+	@echo "Creating DSCI and DSC with all services enabled..."
+	@$(MAKE) e2e-test \
+		-e E2E_TEST_COMPONENTS=false \
+		-e E2E_TEST_SERVICES=false \
+		-e E2E_TEST_WEBHOOK=false \
+		-e E2E_TEST_OPERATOR_RESILIENCE=false \
+		-e E2E_TEST_OPERATOR_V2TOV3UPGRADE=false \
+		-e E2E_TEST_DELETION_POLICY=never \
+		-e E2E_TEST_CLEAN_UP_PREVIOUS_RESOURCES=true
+
+.PHONY: e2e-test-xks
+e2e-test-xks: ## Run e2e tests on external Kubernetes (KinD, AKS, CoreWeave, etc.)
+	@$(MAKE) e2e-test \
+		-e E2E_TEST_CLEAN_UP_PREVIOUS_RESOURCES=false \
+		-e E2E_TEST_DEPENDANT_OPERATORS_MANAGEMENT=false \
+		-e E2E_TEST_WEBHOOK=false \
+		-e E2E_TEST_COMPONENT="kserve" \
+		-e E2E_TEST_SERVICES=false \
+		-e E2E_TEST_OPERATOR_RESILIENCE=false \
+		-e E2E_TEST_OPERATOR_V2TOV3UPGRADE=false \
+		-e E2E_TEST_DSC_MANAGEMENT=false \
+		-e E2E_TEST_DSC_VALIDATION=false
+
+##@ KinD Cluster Management
+
+CLUSTER_NAME ?= kind-odh
+KIND_CONFIG_PATH ?= config/kind/kind-config.yaml
+
+.PHONY: kind-create
+kind-create: ## Create KinD Cluster
+	@echo "Creating KinD cluster: $(CLUSTER_NAME) using config $(KIND_CONFIG_PATH)"
+	kind create cluster --name $(CLUSTER_NAME) --config $(KIND_CONFIG_PATH)
+
+.PHONY: kind-delete
+kind-delete: ## Delete KinD Cluster
+	@echo "Deleting KinD cluster: $(CLUSTER_NAME)"
+	kind delete cluster --name $(CLUSTER_NAME)
+
 unit-test-cli:
 	go -C ./cmd/test-retry/ test ./...
 
+##@ Cloud Controller Manager (ccm)
+
+# List of supported CCM providers
+CCM_PROVIDERS := azure coreweave
+
+# Helper functions
+ccm-config-dir = config/cloudmanager/$(1)
+ccm-paths = {./api/cloudmanager/$(1)/...,./internal/controller/cloudmanager/$(1)/...,./internal/controller/cloudmanager/common/...}
+
+##@ CCM Code Generation
+
+.PHONY: update-cloudmanager-rbac
+update-cloudmanager-rbac: yq helm get-manifests ## Update kubebuilder RBAC annotations for cloud manager chart roles
+	bash ./hack/update-cloudmanager-rbac.sh "$(YQ)" "$(HELM)"
+
+.PHONY: manifests-ccm
+manifests-ccm: update-cloudmanager-rbac $(addprefix manifests-ccm-,$(CCM_PROVIDERS)) ## Generate CRDs and RBAC for all providers
+
+CCM_MANIFESTS_TARGETS := $(addprefix manifests-ccm-,$(CCM_PROVIDERS))
+.PHONY: $(CCM_MANIFESTS_TARGETS)
+$(CCM_MANIFESTS_TARGETS): manifests-ccm-%: controller-gen kustomize ## Generate CRDs and RBAC for one provider
+	$(CONTROLLER_GEN) \
+		rbac:roleName=opendatahub-$*-cloud-manager-role \
+		crd:ignoreUnexportedFields=true \
+		webhook \
+		paths="$(call ccm-paths,$*)" \
+		output:crd:artifacts:config=$(call ccm-config-dir,$*)/crd/bases \
+		output:rbac:artifacts:config=$(call ccm-config-dir,$*)/rbac \
+		output:webhook:artifacts:config=$(call ccm-config-dir,$*)/webhook
+	@mkdir -p $(call ccm-config-dir,$*)/crd/bases && \
+		cd $(call ccm-config-dir,$*)/crd/bases && \
+		rm -f kustomization.yaml && \
+		$(KUSTOMIZE) create --autodetect
+
+##@ CCM Build
+
+.PHONY: build-ccm
+build-ccm: generate fmt vet ## Build the cloudmanager binary
+	go build -o bin/cloudmanager ./cmd/cloudmanager/
+
+CCM_RUN_TARGETS := $(addprefix run-ccm-,$(CCM_PROVIDERS))
+.PHONY: $(CCM_RUN_TARGETS)
+$(CCM_RUN_TARGETS): run-ccm-%: generate fmt vet ## Run CCM locally (e.g., run-ccm-azure)
+	DEFAULT_CHARTS_PATH=$(DEFAULT_CHARTS_PATH) go run ./cmd/cloudmanager/ $*
+
+##@ CCM Deployment
+
+
+# PULL_SECRET is the path to a dockerconfigjson file for pulling images from private registries.
+# For local usage, you can point to your container runtime auth file, e.g.:
+#   make kind-setup-pull-secrets PULL_SECRET=~/.docker/config.json
+#   make kind-setup-pull-secrets PULL_SECRET=$${XDG_RUNTIME_DIR}/containers/auth.json
+PULL_SECRET ?=
+
+PULL_SECRET_NAMESPACES := \
+	cert-manager \
+	cert-manager-operator \
+	openshift-lws-operator \
+	istio-system
+
+.PHONY: kind-setup-pull-secrets
+kind-setup-pull-secrets: ## Setup pull secrets for operator dependencies in the cluster
+	@if [ -z "$(PULL_SECRET)" ]; then \
+		echo "Error: PULL_SECRET is required. Set it to the path of your docker config.json."; \
+		echo "  e.g.: make kind-setup-pull-secrets PULL_SECRET=~/.docker/config.json"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(PULL_SECRET)" ]; then \
+		echo "Error: PULL_SECRET file '$(PULL_SECRET)' does not exist."; \
+		exit 1; \
+	fi
+	@for ns in $(PULL_SECRET_NAMESPACES); do \
+		echo "Setting up pull secret in namespace: $$ns"; \
+		kubectl create namespace $$ns --dry-run=client -o yaml | kubectl apply -f -; \
+		kubectl create secret generic rhai-pull-secret \
+			--from-file=.dockerconfigjson="$(PULL_SECRET)" \
+			--type=kubernetes.io/dockerconfigjson \
+			-n $$ns --dry-run=client -o yaml | kubectl apply -f -; \
+	done
+	@echo "Pull secrets configured."
+
+CCM_INSTALL_TARGETS := $(addprefix install-ccm-,$(CCM_PROVIDERS))
+.PHONY: $(CCM_INSTALL_TARGETS)
+$(CCM_INSTALL_TARGETS): install-ccm-%: manifests-ccm-% kustomize ## Install CRDs only (e.g., install-ccm-azure)
+	$(KUSTOMIZE) build $(call ccm-config-dir,$*)/crd | kubectl apply -f -
+
+CCM_UNINSTALL_TARGETS := $(addprefix uninstall-ccm-,$(CCM_PROVIDERS))
+.PHONY: $(CCM_UNINSTALL_TARGETS)
+$(CCM_UNINSTALL_TARGETS): uninstall-ccm-%: kustomize ## Uninstall CRDs (e.g., uninstall-ccm-azure)
+	$(KUSTOMIZE) build $(call ccm-config-dir,$*)/crd | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
+
+CCM_DEPLOY_TARGETS := $(addprefix deploy-ccm-,$(CCM_PROVIDERS))
+.PHONY: $(CCM_DEPLOY_TARGETS)
+$(CCM_DEPLOY_TARGETS): deploy-ccm-%: manifests-ccm-% kustomize ## Deploy CCM to cluster (e.g., deploy-ccm-azure)
+	cd $(call ccm-config-dir,$*)/manager && \
+		cp -f kustomization.yaml.in kustomization.yaml && \
+		$(KUSTOMIZE) edit set image REPLACE_IMAGE=$(IMG)
+	$(KUSTOMIZE) build $(call ccm-config-dir,$*)/$(CCM_DEPLOY_OVERLAY) | kubectl apply -f -
+
+CCM_DEPLOY_LOCAL_TARGETS := $(addprefix deploy-ccm-local-,$(CCM_PROVIDERS))
+.PHONY: $(CCM_DEPLOY_LOCAL_TARGETS)
+$(CCM_DEPLOY_LOCAL_TARGETS): deploy-ccm-local-%: manifests-ccm-% kustomize ## Deploy CCM to cluster (e.g., deploy-ccm-azure)
+	cd $(call ccm-config-dir,$*)/manager && \
+		cp -f kustomization.yaml.in kustomization.yaml && \
+		$(KUSTOMIZE) edit set image REPLACE_IMAGE=$(IMG)
+	$(KUSTOMIZE) build $(call ccm-config-dir,$*)/$(CCM_LOCAL_OVERLAY) | kubectl apply -f -
+
+CCM_UNDEPLOY_TARGETS := $(addprefix undeploy-ccm-,$(CCM_PROVIDERS))
+.PHONY: $(CCM_UNDEPLOY_TARGETS)
+$(CCM_UNDEPLOY_TARGETS): undeploy-ccm-%: kustomize ## Undeploy CCM from cluster (e.g., undeploy-ccm-azure)
+	$(KUSTOMIZE) build $(call ccm-config-dir,$*)/$(CCM_DEPLOY_OVERLAY) | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
+
 .PHONY: clean
-clean: $(GOLANGCI_LINT)
+clean: clean-manifests $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) cache clean
 	chmod -R u+w $(LOCALBIN) # envtest makes its dir RO
 	rm -rf $(CLEANFILES)
