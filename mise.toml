@@ -1,0 +1,26 @@
+[tools]
+go = "1.26"
+"nix:operator-sdk" = "1.42.0"
+"nix:jq" = "latest"
+"nix:gnused" = "latest"
+
+[env]
+QUAY_SERVER = "quay.io/rh-ee-lbondy"
+IMAGE_TAG_BASE = "quay.io/rh-ee-lbondy/opendatahub-operator"
+OPERATOR_NAMESPACE = "opendatahub-operator-system"
+GOPROXY = "https://proxy.golang.org,direct"
+GOSUMDB = "sum.golang.org"
+_.path = "{{config_root}}/bin"
+
+[hooks.enter]
+script = """
+# Create local bin directory
+mkdir -p "{{config_root}}/bin"
+
+# Link gnused to gsed for compatibility
+if command -v gnused &> /dev/null; then
+  ln -sf "$(which gnused)" "{{config_root}}/bin/gsed"
+else
+  ln -sf "$(which sed)" "{{config_root}}/bin/gsed"
+fi
+"""
