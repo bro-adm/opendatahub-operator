@@ -118,15 +118,9 @@ func buildPlatformContext(ctx context.Context, rr *odhtype.ReconciliationRequest
 		return nil, fmt.Errorf("failed to resolve application namespace: %w", err)
 	}
 
-	// Monitoring namespace  read directly from DSCI or set to empty when no DSCI (xKS).
-	var monitoringNS string
-	if rr.DSCI != nil {
-		monitoringNS = rr.DSCI.Spec.Monitoring.Namespace
-	}
-
 	return &PlatformContext{
 		ApplicationsNamespace: appNS,
-		MonitoringNamespace:   monitoringNS,
+		MonitoringNamespace:   "", // Monitoring removed
 		Release:               rr.Release,
 		DSC:                   dscFromInstance(rr),
 		DSCI:                  dsciOrNil(rr),

@@ -104,7 +104,6 @@ import (
 	"github.com/opendatahub-io/opendatahub-operator/v2/internal/controller/services/auth"
 	"github.com/opendatahub-io/opendatahub-operator/v2/internal/controller/services/certconfigmapgenerator"
 	"github.com/opendatahub-io/opendatahub-operator/v2/internal/controller/services/gateway"
-	"github.com/opendatahub-io/opendatahub-operator/v2/internal/controller/services/monitoring"
 	sr "github.com/opendatahub-io/opendatahub-operator/v2/internal/controller/services/registry"
 	"github.com/opendatahub-io/opendatahub-operator/v2/internal/controller/services/setup"
 	"github.com/opendatahub-io/opendatahub-operator/v2/internal/webhook"
@@ -185,7 +184,6 @@ var (
 		serviceApi.AuthServiceName:         auth.NewHandler(),
 		certconfigmapgenerator.ServiceName: certconfigmapgenerator.NewHandler(),
 		serviceApi.GatewayServiceName:      gateway.NewHandler(),
-		serviceApi.MonitoringServiceName:   monitoring.NewHandler(),
 		setup.ServiceName:                  setup.NewHandler(),
 	}
 
@@ -345,15 +343,6 @@ func main() { //nolint:funlen,maintidx,gocyclo
 	if err != nil {
 		setupLog.Error(err, "unable to initialize cluster config")
 		os.Exit(1)
-	}
-
-	if oconfig.MonitoringNamespace == "" {
-		switch cluster.GetRelease().Name {
-		case cluster.ManagedRhoai, cluster.SelfManagedRhoai:
-			oconfig.MonitoringNamespace = cluster.DefaultMonitoringNamespaceRHOAI
-		default:
-			oconfig.MonitoringNamespace = cluster.DefaultMonitoringNamespaceODH
-		}
 	}
 
 	// If RHAI_APPLICATIONS_NAMESPACE is explicitly configured (via env var or CLI flag),

@@ -180,18 +180,6 @@ func ApplicationNamespace(ctx context.Context, cli client.Client) (string, error
 	return dsci.Spec.ApplicationsNamespace, nil
 }
 
-// MonitoringNamespace returns the monitoring namespace from DSCInitialization.
-func MonitoringNamespace(ctx context.Context, cli client.Client) (string, error) {
-	dsci, err := GetDSCI(ctx, cli)
-	if err != nil {
-		if k8serr.IsNotFound(err) {
-			return "", fmt.Errorf("MonitoringNamespace not available, DSCI not found: %w", err)
-		}
-		return "", fmt.Errorf("failed to get DSCInitialization: %w", err)
-	}
-	return dsci.Spec.Monitoring.Namespace, nil
-}
-
 // NamespaceExists checks if a given namespace exists in the cluster and is not terminating.
 func NamespaceExists(ctx context.Context, c client.Client, name string) (bool, error) {
 	ns := &corev1.Namespace{}

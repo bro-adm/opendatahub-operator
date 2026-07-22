@@ -18,10 +18,6 @@ limitations under the License.
 
 package v2
 
-import (
-	serviceApi "github.com/opendatahub-io/opendatahub-operator/v2/api/services/v1alpha1"
-)
-
 // DSCInitializationSpec defines the desired state of DSCInitialization.
 type DSCInitializationSpec struct {
 	// Namespace for applications to be installed, non-configurable, default to "redhat-ods-applications"
@@ -30,9 +26,6 @@ type DSCInitializationSpec struct {
 	// +kubebuilder:validation:Pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
 	// +kubebuilder:validation:MaxLength=63
 	ApplicationsNamespace string `json:"applicationsNamespace,omitempty"`
-	// Enable monitoring on specified namespace
-	// +optional
-	Monitoring serviceApi.DSCIMonitoring `json:"monitoring,omitempty"`
 	// When set to `Managed`, adds odh-trusted-ca-bundle Configmap to all namespaces that includes
 	// cluster-wide Trusted CA Bundle in .data["ca-bundle.crt"].
 	// Additionally, this fields allows admins to add custom CA bundles to the configmap using the .CustomCABundle field.

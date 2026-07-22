@@ -390,12 +390,6 @@ var _ = Describe("DataScienceCluster initialization", func() {
 				},
 				Spec: dsciv2.DSCInitializationSpec{
 					ApplicationsNamespace: privilegedAppNs,
-					Monitoring: serviceApi.DSCIMonitoring{
-						ManagementSpec: common.ManagementSpec{ManagementState: operatorv1.Removed},
-						MonitoringCommonSpec: serviceApi.MonitoringCommonSpec{
-							Namespace: monitoringNamespace,
-						},
-					},
 					TrustedCABundle: &dsciv2.TrustedCABundleSpec{
 						ManagementState: operatorv1.Managed,
 					},
@@ -511,12 +505,6 @@ func createDSCI(enableMonitoring operatorv1.ManagementState, enableTrustedCABund
 		},
 		Spec: dsciv2.DSCInitializationSpec{
 			ApplicationsNamespace: applicationNamespace,
-			Monitoring: serviceApi.DSCIMonitoring{
-				ManagementSpec: common.ManagementSpec{ManagementState: enableMonitoring},
-				MonitoringCommonSpec: serviceApi.MonitoringCommonSpec{
-					Namespace: monitoringNS,
-				},
-			},
 			TrustedCABundle: &dsciv2.TrustedCABundleSpec{
 				ManagementState: enableTrustedCABundle,
 			},
@@ -536,12 +524,6 @@ func createCustomizedDSCI(appNS string) *dsciv2.DSCInitialization {
 		},
 		Spec: dsciv2.DSCInitializationSpec{
 			ApplicationsNamespace: appNS,
-			Monitoring: serviceApi.DSCIMonitoring{
-				ManagementSpec: common.ManagementSpec{ManagementState: operatorv1.Removed},
-				MonitoringCommonSpec: serviceApi.MonitoringCommonSpec{
-					Namespace: monitoringNamespace,
-				},
-			},
 			TrustedCABundle: &dsciv2.TrustedCABundleSpec{
 				ManagementState: operatorv1.Managed,
 			},

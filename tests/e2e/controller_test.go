@@ -188,9 +188,8 @@ var (
 		enabled:  true,
 		parallel: true,
 		scenarios: []map[string]TestFn{{
-			serviceApi.MonitoringServiceName: monitoringTestSuite,
-			serviceApi.AuthServiceName:       authControllerTestSuite,
-			serviceApi.GatewayServiceName:    gatewayTestSuite,
+			serviceApi.AuthServiceName:    authControllerTestSuite,
+			serviceApi.GatewayServiceName: gatewayTestSuite,
 		}},
 	}
 )
@@ -485,14 +484,11 @@ func TestOdhOperator(t *testing.T) {
 		mustRun(t, "DAG Ordering E2E Tests", dagOrderingTestSuite)
 	}
 
-	// Run monitoring before components — monitoring setup is a prerequisite.
-	mustRun(t, serviceApi.MonitoringServiceName, Services.RunSingle(serviceApi.MonitoringServiceName))
-
 	// Run components test suites
 	mustRun(t, Components.String(), Components.Run)
 
-	// Run remaining services (auth, gateway)
-	mustRun(t, Services.String(), Services.RunExcluding(serviceApi.MonitoringServiceName))
+	// Run services (auth, gateway)
+	mustRun(t, Services.String(), Services.Run)
 
 	// Run operator resilience test suites after functional tests
 	if testOpts.operatorResilienceTest {

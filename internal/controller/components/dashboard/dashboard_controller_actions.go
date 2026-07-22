@@ -60,55 +60,7 @@ func initialize(_ context.Context, rr *odhtypes.ReconciliationRequest) error { /
 }
 
 func deployObservabilityManifests(ctx context.Context, rr *odhtypes.ReconciliationRequest) error {
-	if rr.SkipDeploy {
-		return nil
-	}
-
-	// Check if PersesDashboard CRD exists in either v1alpha2 or v1alpha1 (COO installed)
-	v2Exists, err := cluster.HasCRD(ctx, rr.Client, gvk.PersesDashboardV1Alpha2)
-	if err != nil {
-		return odherrors.NewStopError("failed to check if %s CRD exists: %w", gvk.PersesDashboardV1Alpha2, err)
-	}
-	if !v2Exists {
-		v1Exists, err := cluster.HasCRD(ctx, rr.Client, gvk.PersesDashboardV1Alpha1)
-		if err != nil {
-			return odherrors.NewStopError("failed to check if %s CRD exists: %w", gvk.PersesDashboardV1Alpha1, err)
-		}
-		if !v1Exists {
-			return nil
-		}
-	}
-
-	// Get the monitoring namespace from DSCI with platform-specific fallback
-	monitoringNamespace, err := cluster.MonitoringNamespace(ctx, rr.Client)
-	if err != nil {
-		if rr.Release.Name == cluster.OpenDataHub {
-			monitoringNamespace = cluster.DefaultMonitoringNamespaceODH
-		} else {
-			monitoringNamespace = cluster.DefaultMonitoringNamespaceRHOAI
-		}
-	}
-
-	// Safety check: do not deploy if monitoring namespace is empty
-	if monitoringNamespace == "" {
-		return nil
-	}
-
-	manifestPath := observabilityManifestInfo(rr.ManifestsBasePath, rr.Release.Name).String()
-
-	err = odhdeploy.DeployManifestsFromPath(
-		ctx,
-		rr.Client,
-		rr.Instance, // owner for GC
-		manifestPath,
-		monitoringNamespace, // deploy to monitoring namespace
-		ComponentName,       // "dashboard"
-		true,                // enabled
-	)
-	if err != nil {
-		return fmt.Errorf("failed to deploy observability manifests: %w", err)
-	}
-
+	// Monitoring has been removed - no observability manifests to deploy
 	return nil
 }
 

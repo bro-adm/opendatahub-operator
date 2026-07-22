@@ -49,10 +49,6 @@ type PlatformModules struct {
 	// +optional
 	AIGateway common.ManagementSpec `json:"aigateway,omitempty"`
 
-	// Monitoring controls the monitoring module operator lifecycle.
-	// +optional
-	Monitoring common.ManagementSpec `json:"monitoring,omitempty"`
-
 	// MCPLifecycleOperator controls the MCP Lifecycle Operator module lifecycle.
 	// +optional
 	MCPLifecycleOperator common.ManagementSpec `json:"mcplifecycleoperator,omitempty"`
@@ -108,9 +104,6 @@ func (m *PlatformModules) EnabledModules() []string {
 	var enabled []string
 	if m.AIGateway.ManagementState == operatorv1.Managed {
 		enabled = append(enabled, "aigateway")
-	}
-	if m.Monitoring.ManagementState == operatorv1.Managed {
-		enabled = append(enabled, "monitoring")
 	}
 	if m.MCPLifecycleOperator.ManagementState == operatorv1.Managed {
 		enabled = append(enabled, "mcplifecycleoperator")

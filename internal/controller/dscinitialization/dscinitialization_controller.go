@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 	"time"
 
-	operatorv1 "github.com/openshift/api/operator/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serr "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -209,19 +208,6 @@ func (r *DSCInitializationReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 	}
 
-	switch instance.Spec.Monitoring.ManagementState {
-	case operatorv1.Managed:
-		if err = r.newMonitoringCR(ctx, instance); err != nil {
-			return ctrl.Result{}, err
-		}
-	case operatorv1.Removed:
-		if err = r.deleteMonitoringCR(ctx); err != nil {
-			return reconcile.Result{}, err
-		}
-	default:
-		// Unknown or empty state: do nothing
-	}
-
 	// legacy ServiceMesh FeatureTracker cleanup, retained from the remove ServiceMesh controller
 	// TODO where exactly to put this logic ?
 	ftNames := []string{
@@ -265,12 +251,8 @@ func (r *DSCInitializationReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	// Finish reconciling
-	monitoringConditions := r.GetMonitoringReadyCondition(ctx)
 	_, err = status.UpdateWithRetry(ctx, r.Client, instance, func(saved *dsciv2.DSCInitialization) {
 		status.SetCompleteCondition(&saved.Status.Conditions, status.ReconcileCompleted, status.ReconcileCompletedMessage)
-		for _, c := range monitoringConditions {
-			status.SetCondition(&saved.Status.Conditions, c.Type, c.ReadyReason, c.ReadyMessage, c.ReadyStatus)
-		}
 		saved.Status.Phase = status.PhaseReady
 	})
 	if err != nil {
@@ -351,10 +333,6 @@ func (r *DSCInitializationReconciler) SetupWithManager(ctx context.Context, mgr 
 			getObject(gvk.GatewayConfig),
 			handler.EnqueueRequestsFromMapFunc(r.watchGatewayConfigResource),
 		).
-		Watches(
-			getObject(gvk.Monitoring),
-			handler.EnqueueRequestsFromMapFunc(r.watchMonitoringResource),
-		).
 		Watches( // TODO: this might not be needed after v3.3.
 			getObject(gvk.CustomResourceDefinition),
 			handler.EnqueueRequestsFromMapFunc(r.watchHWProfileCRDResource),
@@ -397,162 +375,6 @@ func (r *DSCInitializationReconciler) watchGatewayConfigResource(ctx context.Con
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: serviceApi.GatewayConfigName}}}
 	}
 
-	return nil
-}
-
-func (r *DSCInitializationReconciler) watchMonitoringResource(ctx context.Context, _ client.Object) []reconcile.Request {
-	log := logf.FromContext(ctx)
-	instanceList := &serviceApi.MonitoringList{}
-	if err := r.Client.List(ctx, instanceList); err != nil {
-		log.Error(err, "failed to get MonitoringList")
-		return nil
-	}
-	if len(instanceList.Items) == 0 {
-		log.Info("Found no Monitoring instance in cluster, reconciling to recreate one")
-		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: serviceApi.MonitoringInstanceName}}}
-	}
-
-	// Monitoring CR exists — trigger DSCI reconciliation so it can
-	// propagate the latest Monitoring status into its own conditions.
-	dsciList := &dsciv2.DSCInitializationList{}
-	if err := r.Client.List(ctx, dsciList); err != nil {
-		log.Error(err, "Failed to get DSCInitializationList")
-		return nil
-	}
-	if len(dsciList.Items) == 0 {
-		log.Info("Found no DSCInitialization instance in cluster")
-		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: "default-dsci"}}}
-	}
-
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: dsciList.Items[0].Name}}}
-}
-
-func (r *DSCInitializationReconciler) GetMonitoringReadyCondition(ctx context.Context) []DSCInitializationCondition {
-	monitoring := &serviceApi.Monitoring{}
-	err := r.Client.Get(ctx, client.ObjectKey{Name: serviceApi.MonitoringInstanceName}, monitoring)
-	if err != nil {
-		if k8serr.IsNotFound(err) {
-			return []DSCInitializationCondition{{status.ConditionMonitoringReady, status.RemovedReason, "Monitoring is not enabled", metav1.ConditionFalse}}
-		}
-		return []DSCInitializationCondition{{status.ConditionMonitoringReady, status.NotReadyReason,
-			fmt.Sprintf("Failed to retrieve Monitoring CR status: %v", err), metav1.ConditionUnknown}}
-	}
-
-	monitoringConditions := monitoring.GetConditions()
-	conditions := make([]DSCInitializationCondition, 0, len(monitoringConditions)+1)
-
-	for _, c := range monitoringConditions {
-		switch c.Type {
-		case status.ConditionTypeReady,
-			status.ConditionTypeProvisioningSucceeded,
-			status.ConditionMonitoringStackAvailable,
-			status.ConditionThanosQuerierAvailable,
-			status.ConditionOpenTelemetryCollectorAvailable,
-			status.ConditionTempoAvailable,
-			status.ConditionPersesAvailable,
-			status.ConditionAlertingAvailable,
-			status.ConditionNodeMetricsEndpointAvailable:
-			conditions = append(conditions, DSCInitializationCondition{
-				Type:         c.Type,
-				ReadyReason:  c.Reason,
-				ReadyMessage: c.Message,
-				ReadyStatus:  c.Status,
-			})
-		}
-	}
-
-	if len(conditions) == 0 {
-		return []DSCInitializationCondition{{status.ConditionMonitoringReady, status.NotReadyReason, "Monitoring stack is initializing", metav1.ConditionUnknown}}
-	}
-
-	conditions = append(conditions, DSCInitializationCondition{
-		Type:         status.ConditionMonitoringReady,
-		ReadyReason:  status.ReadyReason,
-		ReadyMessage: "Monitoring stack is initialized",
-		ReadyStatus:  metav1.ConditionTrue,
-	})
-
-	return conditions
-}
-
-func (r *DSCInitializationReconciler) deleteMonitoringCR(ctx context.Context) error {
-	defaultMonitoring := &serviceApi.Monitoring{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: serviceApi.MonitoringInstanceName,
-		},
-	}
-	err := r.Client.Delete(ctx, defaultMonitoring)
-	if err != nil && !k8serr.IsNotFound(err) {
-		return err
-	}
-
-	return nil
-}
-
-func (r *DSCInitializationReconciler) newMonitoringCR(ctx context.Context, dsci *dsciv2.DSCInitialization) error {
-	defaultMonitoring := &serviceApi.Monitoring{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       serviceApi.MonitoringKind,
-			APIVersion: serviceApi.GroupVersion.String(),
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: serviceApi.MonitoringInstanceName,
-		},
-		Spec: serviceApi.MonitoringSpec{
-			MonitoringCommonSpec: serviceApi.MonitoringCommonSpec{
-				Namespace: dsci.Spec.Monitoring.Namespace,
-			},
-		},
-	}
-
-	metricsEnabled := dsci.Spec.Monitoring.Metrics != nil && dsci.Spec.Monitoring.Metrics.Storage != nil
-	tracesEnabled := dsci.Spec.Monitoring.Traces != nil
-
-	if metricsEnabled {
-		defaultMonitoring.Spec.Metrics = dsci.Spec.Monitoring.Metrics
-	} else {
-		defaultMonitoring.Spec.Metrics = nil
-	}
-
-	if tracesEnabled {
-		defaultMonitoring.Spec.Traces = dsci.Spec.Monitoring.Traces
-		if defaultMonitoring.Spec.Traces.TLS != nil && !defaultMonitoring.Spec.Traces.TLS.Enabled {
-			defaultMonitoring.Spec.Traces.TLS = nil
-		}
-	} else {
-		defaultMonitoring.Spec.Traces = nil
-	}
-
-	defaultMonitoring.Spec.Alerting = dsci.Spec.Monitoring.Alerting
-
-	if metricsEnabled || tracesEnabled {
-		if dsci.Spec.Monitoring.CollectorReplicas != 0 {
-			defaultMonitoring.Spec.CollectorReplicas = dsci.Spec.Monitoring.CollectorReplicas
-		} else {
-			isSNO := cluster.IsSingleNodeCluster(ctx, r.Client)
-			if isSNO {
-				defaultMonitoring.Spec.CollectorReplicas = 1
-			} else {
-				defaultMonitoring.Spec.CollectorReplicas = 2
-			}
-		}
-	}
-
-	if err := controllerutil.SetOwnerReference(dsci, defaultMonitoring, r.Client.Scheme()); err != nil {
-		return err
-	}
-
-	err := resources.Apply(
-		ctx,
-		r.Client,
-		defaultMonitoring,
-		client.FieldOwner(fieldManager),
-		client.ForceOwnership,
-	)
-
-	if err != nil && !k8serr.IsAlreadyExists(err) {
-		return err
-	}
 	return nil
 }
 

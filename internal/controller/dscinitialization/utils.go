@@ -7,7 +7,6 @@ import (
 	"maps"
 	"path/filepath"
 
-	operatorv1 "github.com/openshift/api/operator/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	k8serr "k8s.io/apimachinery/pkg/api/errors"
@@ -39,13 +38,6 @@ func (r *DSCInitializationReconciler) createOperatorResource(ctx context.Context
 	if err := r.appNamespaceHandler(ctx, dscInit, platform); err != nil {
 		log.Error(err, "error handle application namespace")
 		return err
-	}
-
-	if dscInit.Spec.Monitoring.ManagementState == operatorv1.Managed {
-		if err := PatchMonitoringNS(ctx, r.Client, dscInit); err != nil {
-			log.Error(err, "error patching monitoring namespace")
-			return err
-		}
 	}
 
 	// Create default NetworkPolicy for the namespace
@@ -123,31 +115,6 @@ func (r *DSCInitializationReconciler) createAppNamespace(ctx context.Context, ns
 		resources.SetLabels(desiredDefaultNS, labelList)
 		return nil
 	})
-	return err
-}
-
-// PatchMonitoringNS ensures the monitoring namespace exists and sets labels for
-// operator ownership (ODH.OwnedNamespace) and pod security baseline (SecurityEnforce).
-func PatchMonitoringNS(ctx context.Context, cli client.Client, dscInit *dsciv2.DSCInitialization) error {
-	monitoringName := dscInit.Spec.Monitoring.Namespace
-	if dscInit.Spec.ApplicationsNamespace == monitoringName {
-		return nil
-	}
-
-	desiredMonitoringNamespace := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: monitoringName,
-		},
-	}
-
-	_, err := controllerutil.CreateOrUpdate(ctx, cli, desiredMonitoringNamespace, func() error {
-		resources.SetLabels(desiredMonitoringNamespace, map[string]string{
-			labels.ODH.OwnedNamespace: labels.True,
-			labels.SecurityEnforce:    "baseline",
-		})
-		return nil
-	})
-
 	return err
 }
 

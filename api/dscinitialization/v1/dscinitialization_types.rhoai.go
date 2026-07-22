@@ -20,7 +20,6 @@ package v1
 
 import (
 	infrav1 "github.com/opendatahub-io/opendatahub-operator/v2/api/infrastructure/v1"
-	serviceApi "github.com/opendatahub-io/opendatahub-operator/v2/api/services/v1alpha1"
 )
 
 // DSCInitializationSpec defines the desired state of DSCInitialization.
@@ -31,9 +30,6 @@ type DSCInitializationSpec struct {
 	// +kubebuilder:validation:Pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
 	// +kubebuilder:validation:MaxLength=63
 	ApplicationsNamespace string `json:"applicationsNamespace,omitempty"`
-	// Enable monitoring on specified namespace
-	// +optional
-	Monitoring serviceApi.DSCIMonitoring `json:"monitoring,omitempty"`
 	// Configures Service Mesh as networking layer for Data Science Clusters components.
 	// The Service Mesh is a mandatory prerequisite for single model serving (KServe) and
 	// you should review this configuration if you are planning to use KServe.

@@ -361,12 +361,6 @@ var (
 		Kind:    componentApi.TrainerKind,
 	}
 
-	Monitoring = schema.GroupVersionKind{
-		Group:   serviceApi.GroupVersion.Group,
-		Version: serviceApi.GroupVersion.Version,
-		Kind:    serviceApi.MonitoringKind,
-	}
-
 	Platform = schema.GroupVersionKind{
 		Group:   configApi.GroupVersion.Group,
 		Version: configApi.GroupVersion.Version,

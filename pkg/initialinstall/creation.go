@@ -13,7 +13,6 @@ import (
 	componentApi "github.com/opendatahub-io/opendatahub-operator/v2/api/components/v1alpha1"
 	dscv2 "github.com/opendatahub-io/opendatahub-operator/v2/api/datasciencecluster/v2"
 	dsciv2 "github.com/opendatahub-io/opendatahub-operator/v2/api/dscinitialization/v2"
-	serviceApi "github.com/opendatahub-io/opendatahub-operator/v2/api/services/v1alpha1"
 	"github.com/opendatahub-io/opendatahub-operator/v2/pkg/cluster"
 )
 
@@ -108,13 +107,6 @@ func CreateDefaultDSC(ctx context.Context, cli client.Client) error {
 func CreateDefaultDSCI(ctx context.Context, cli client.Client, _ common.Platform, monNamespace string) error {
 	log := logf.FromContext(ctx)
 	defaultDsciSpec := &dsciv2.DSCInitializationSpec{
-		Monitoring: serviceApi.DSCIMonitoring{
-			ManagementSpec: common.ManagementSpec{ManagementState: operatorv1.Managed},
-			MonitoringCommonSpec: serviceApi.MonitoringCommonSpec{
-				Namespace: monNamespace,
-				Metrics:   &serviceApi.Metrics{},
-			},
-		},
 		TrustedCABundle: &dsciv2.TrustedCABundleSpec{
 			ManagementState: "Managed",
 		},

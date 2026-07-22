@@ -29,7 +29,6 @@ func (c *DSCInitialization) ConvertTo(dstRaw conversion.Hub) error {
 
 	dst.Spec = dsciv2.DSCInitializationSpec{
 		ApplicationsNamespace: c.Spec.ApplicationsNamespace,
-		Monitoring:            c.Spec.Monitoring,
 	}
 	if c.Spec.TrustedCABundle != nil {
 		dst.Spec.TrustedCABundle = &dsciv2.TrustedCABundleSpec{
@@ -62,7 +61,6 @@ func (c *DSCInitialization) ConvertFrom(srcRaw conversion.Hub) error {
 
 	c.Spec = DSCInitializationSpec{
 		ApplicationsNamespace: src.Spec.ApplicationsNamespace,
-		Monitoring:            src.Spec.Monitoring,
 	}
 	if src.Spec.TrustedCABundle != nil {
 		c.Spec.TrustedCABundle = &TrustedCABundleSpec{
