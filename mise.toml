@@ -1,0 +1,35 @@
+[tools]
+go = "1.26.5"
+"nix:operator-sdk" = "1.42.0"
+"nix:jq" = "latest"
+"nix:gnused" = "latest"
+
+[env]
+QUAY_SERVER = "quay.io/rh-ee-lbondy"
+IMAGE_TAG_BASE = "quay.io/rh-ee-lbondy/opendatahub-operator"
+OPERATOR_NAMESPACE = "opendatahub-operator-system"
+GOPROXY = "https://proxy.golang.org,direct"
+GOSUMDB = "sum.golang.org"
+# This checkout is a git worktree, so its .git is a file. Go's buildvcs only
+# recognizes a .git *directory*, so it walks up and lands on the parent bare
+# repo, where `git status` fails with "must be run in a work tree" (exit 128).
+# That breaks `go list ./...`, which the Makefile uses to compute the package
+# list for controller-gen. Nothing here reads runtime/debug build info, and the
+# container build already excludes .git via .dockerignore, so stamping is moot.
+# Set explicitly rather than via `go env -w`: an exported GOFLAGS replaces the
+# `go env` value outright instead of merging with it.
+GOFLAGS = "-buildvcs=false"
+_.path = "{{config_root}}/bin"
+
+[hooks.enter]
+script = """
+# Create local bin directory
+mkdir -p "{{config_root}}/bin"
+
+# Link gnused to gsed for compatibility
+if command -v gnused &> /dev/null; then
+  ln -sf "$(which gnused)" "{{config_root}}/bin/gsed"
+else
+  ln -sf "$(which sed)" "{{config_root}}/bin/gsed"
+fi
+"""
