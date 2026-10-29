@@ -7,9 +7,11 @@ go = "1.26.5"
 [env]
 QUAY_SERVER = "quay.io/rh-ee-lbondy"
 IMAGE_TAG_BASE = "quay.io/rh-ee-lbondy/opendatahub-operator"
-OPERATOR_NAMESPACE = "opendatahub-operator-system"
+# OPERATOR_NAMESPACE = "opendatahub-operator-system"
 GOPROXY = "https://proxy.golang.org,direct"
 GOSUMDB = "sum.golang.org"
+ODH_PLATFORM_TYPE = "rhoai"
+OPERATOR_NAMESPACE = "redhat-ods-operator"
 # This checkout is a git worktree, so its .git is a file. Go's buildvcs only
 # recognizes a .git *directory*, so it walks up and lands on the parent bare
 # repo, where `git status` fails with "must be run in a work tree" (exit 128).
